@@ -7,7 +7,7 @@ pub mod screenshot;
 pub mod window;
 
 pub use app::*;
-pub use ax::raise_windows;
+pub use ax::{raise_window, raise_windows};
 pub use ocr::{ocr_image, TextMatch};
 pub use screenshot::*;
 pub use window::*;
