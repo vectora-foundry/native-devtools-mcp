@@ -59,7 +59,29 @@ fn is_app_bundle_binary(exe_path: &Path) -> bool {
 /// Path of the running binary (symlinks resolved when possible).
 pub fn current_exe_path() -> std::io::Result<PathBuf> {
     let path = std::env::current_exe()?;
-    Ok(std::fs::canonicalize(&path).unwrap_or(path))
+    let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(match resolved.to_str() {
+        Some(text) => PathBuf::from(strip_verbatim_prefix(text)),
+        None => resolved,
+    })
+}
+
+/// Turns a Windows verbatim path from `canonicalize` into its plain form,
+/// so it can be written as an MCP `command`: `\\?\C:\x` becomes `C:\x`
+/// and `\\?\UNC\server\share` becomes `\\server\share`. Other verbatim
+/// forms (device or volume GUID paths) have no plain form and are kept.
+pub fn strip_verbatim_prefix(path: &str) -> String {
+    if let Some(unc_rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc_rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        let bytes = rest.as_bytes();
+        let is_drive_path = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        if is_drive_path {
+            return rest.to_string();
+        }
+    }
+    path.to_string()
 }
 
 /// `$CARGO_HOME/bin`, if `CARGO_HOME` is set.
@@ -157,6 +179,70 @@ mod tests {
         assert_eq!(
             classify("/Users/example/NativeDevtools/Contents/MacOS/native-devtools-mcp"),
             InstallSource::Unknown
+        );
+    }
+
+    #[test]
+    fn verbatim_drive_path_becomes_plain_drive_path() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Users\example\.cargo\bin\native-devtools-mcp.exe"),
+            r"C:\Users\example\.cargo\bin\native-devtools-mcp.exe"
+        );
+    }
+
+    #[test]
+    fn verbatim_unc_path_becomes_plain_unc_path() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share\tools\native-devtools-mcp.exe"),
+            r"\\server\share\tools\native-devtools-mcp.exe"
+        );
+    }
+
+    #[test]
+    fn verbatim_volume_guid_path_is_kept() {
+        let volume =
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\bin\native-devtools-mcp.exe";
+        assert_eq!(strip_verbatim_prefix(volume), volume);
+    }
+
+    #[test]
+    fn plain_paths_are_unchanged() {
+        assert_eq!(
+            strip_verbatim_prefix("/Users/example/.cargo/bin/native-devtools-mcp"),
+            "/Users/example/.cargo/bin/native-devtools-mcp"
+        );
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Tools\native-devtools-mcp.exe"),
+            r"C:\Tools\native-devtools-mcp.exe"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backslash_npm_path_is_npm_package() {
+        assert_eq!(
+            classify(
+                r"C:\Users\example\AppData\Roaming\npm\node_modules\@sh3ll3x3c\native-devtools-mcp-win32-x64\bin\native-devtools-mcp.exe"
+            ),
+            InstallSource::NpmPackage
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backslash_cargo_bin_is_cargo_install() {
+        assert_eq!(
+            classify(r"C:\Users\example\.cargo\bin\native-devtools-mcp.exe"),
+            InstallSource::CargoInstall
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backslash_source_build_is_source_build() {
+        assert_eq!(
+            classify(r"C:\src\native-devtools-mcp\target\release\native-devtools-mcp.exe"),
+            InstallSource::SourceBuild
         );
     }
 
