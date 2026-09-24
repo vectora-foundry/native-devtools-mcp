@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.sh3ll3x3c/native-devtools",
+  "name": "io.github.vectora-foundry/native-devtools",
   "title": "Native DevTools",
   "description": "MCP server for computer use & browser automation on macOS, Windows & Android — screenshot, OCR, click, type, find_text, Chrome/Electron CDP, template matching.",
   "repository": {
-    "url": "https://github.com/sh3ll3x3c/native-devtools-mcp",
+    "url": "https://github.com/vectora-foundry/native-devtools-mcp",
     "source": "github"
   },
-  "websiteUrl": "https://github.com/sh3ll3x3c/native-devtools-mcp",
+  "websiteUrl": "https://github.com/vectora-foundry/native-devtools-mcp",
   "version": "0.10.1",
   "packages": [
     {

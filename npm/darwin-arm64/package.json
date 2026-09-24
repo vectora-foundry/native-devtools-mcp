@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sh3ll3x3c/native-devtools-mcp.git"
+    "url": "git+https://github.com/vectora-foundry/native-devtools-mcp.git"
   },
   "os": [
     "darwin"

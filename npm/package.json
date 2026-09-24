@@ -1,14 +1,14 @@
 {
   "name": "native-devtools-mcp",
   "version": "0.10.1",
-  "mcpName": "io.github.sh3ll3x3c/native-devtools",
+  "mcpName": "io.github.vectora-foundry/native-devtools",
   "description": "MCP server for computer use & browser automation — screenshot, OCR, click, type, find_text, Chrome/Electron CDP, template matching. macOS, Windows & Android.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sh3ll3x3c/native-devtools-mcp.git"
+    "url": "git+https://github.com/vectora-foundry/native-devtools-mcp.git"
   },
-  "homepage": "https://github.com/sh3ll3x3c/native-devtools-mcp",
+  "homepage": "https://github.com/vectora-foundry/native-devtools-mcp",
   "keywords": [
     "mcp",
     "mcp-server",

@@ -5,7 +5,7 @@ use std::path::Path;
 use super::install_source::{self, InstallSource};
 use super::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
 
-const REPO: &str = "sh3ll3x3c/native-devtools-mcp";
+const REPO: &str = "vectora-foundry/native-devtools-mcp";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run() {

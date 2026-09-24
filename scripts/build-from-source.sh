@@ -43,7 +43,7 @@ else
         echo -e "  Using existing directory: ${DIM}${PROJECT_ROOT}${NC}"
     else
         echo "  Cloning repository..."
-        git clone https://github.com/sh3ll3x3c/native-devtools-mcp.git "$CLONE_DIR"
+        git clone https://github.com/vectora-foundry/native-devtools-mcp.git "$CLONE_DIR"
         PROJECT_ROOT="$(cd "$CLONE_DIR" && pwd)"
     fi
 fi
