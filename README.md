@@ -116,13 +116,13 @@ npm install -g native-devtools-mcp
 **Using the build script** (clones, builds, and runs setup):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sh3ll3x3c/native-devtools-mcp/master/scripts/build-from-source.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vectora-foundry/native-devtools-mcp/master/scripts/build-from-source.sh | bash
 ```
 
 **Or manually:**
 
 ```bash
-git clone https://github.com/sh3ll3x3c/native-devtools-mcp
+git clone https://github.com/vectora-foundry/native-devtools-mcp
 cd native-devtools-mcp
 cargo build --release
 # Binary: ./target/release/native-devtools-mcp
@@ -189,7 +189,7 @@ This will:
 
 Then restart your MCP client and you're ready to go.
 
-> **Claude Desktop on macOS** requires the signed app bundle (Gatekeeper blocks npx). Download `NativeDevtools-X.X.X.dmg` from [GitHub Releases](https://github.com/sh3ll3x3c/native-devtools-mcp/releases), drag to `/Applications`, then run setup — it will detect the app and configure Claude Desktop to use it.
+> **Claude Desktop on macOS** requires the signed app bundle (Gatekeeper blocks npx). Download `NativeDevtools-X.X.X.dmg` from [GitHub Releases](https://github.com/vectora-foundry/native-devtools-mcp/releases), drag to `/Applications`, then run setup — it will detect the app and configure Claude Desktop to use it.
 
 > **VS Code, Windsurf, and other clients:** `setup` doesn't auto-detect these yet. Run `setup` for the permission checks, then see the manual configuration above for the JSON config snippet.
 
@@ -310,7 +310,7 @@ This tool requires Accessibility and Screen Recording permissions — that's a l
 native-devtools-mcp verify
 ```
 
-Computes the SHA-256 hash of the running binary and checks it against the official checksums published on the [GitHub Releases](https://github.com/sh3ll3x3c/native-devtools-mcp/releases) page. If the hash matches, you're running an unmodified official build.
+Computes the SHA-256 hash of the running binary and checks it against the official checksums published on the [GitHub Releases](https://github.com/vectora-foundry/native-devtools-mcp/releases) page. If the hash matches, you're running an unmodified official build.
 
 ### Audit the code
 
@@ -428,11 +428,11 @@ Agent-oriented usage — intent definitions, schema examples, reasoning patterns
 
 ## ⭐ Star History
 
-<a href="https://www.star-history.com/?repos=sh3ll3x3c%2Fnative-devtools-mcp&type=date&legend=bottom-right">
+<a href="https://www.star-history.com/?repos=vectora-foundry%2Fnative-devtools-mcp&type=date&legend=bottom-right">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=sh3ll3x3c/native-devtools-mcp&type=date&theme=dark&legend=bottom-right" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=sh3ll3x3c/native-devtools-mcp&type=date&legend=bottom-right" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=sh3ll3x3c/native-devtools-mcp&type=date&legend=bottom-right" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=vectora-foundry/native-devtools-mcp&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=vectora-foundry/native-devtools-mcp&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=vectora-foundry/native-devtools-mcp&type=date&legend=bottom-right" />
  </picture>
 </a>
 
