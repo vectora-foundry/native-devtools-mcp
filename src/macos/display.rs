@@ -1,5 +1,8 @@
 //! Display configuration and coordinate conversion for macOS.
 
+// The `cocoa` crate is deprecated in favor of `objc2`; this module still uses it.
+#![allow(deprecated)]
+
 use core_graphics::display::{CGDisplay, CGMainDisplayID};
 use serde::{Deserialize, Serialize};
 

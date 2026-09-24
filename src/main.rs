@@ -1,6 +1,3 @@
-// Suppress warnings from cocoa/objc crates (deprecated APIs and cfg warnings)
-#![allow(deprecated)]
-
 mod app_protocol;
 #[cfg(feature = "cdp")]
 mod cdp;
