@@ -188,28 +188,35 @@ pub fn scroll(x: f64, y: f64, delta_x: i32, delta_y: i32) -> Result<(), String> 
     move_mouse(x, y)?;
     thread::sleep(Duration::from_millis(10));
 
-    // Use CGEventCreateScrollWheelEvent via FFI since core-graphics crate doesn't expose it
+    // Use CGEventCreateScrollWheelEvent2 via FFI since core-graphics crate doesn't expose it
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
-        fn CGEventCreateScrollWheelEvent(
+        // The non-variadic variant: `CGEventCreateScrollWheelEvent` takes its
+        // extra wheels through `...`, which a fixed-arity binding cannot pass
+        // correctly on arm64.
+        fn CGEventCreateScrollWheelEvent2(
             source: *const std::ffi::c_void,
             units: u32,
             wheel_count: u32,
             wheel1: i32,
             wheel2: i32,
+            wheel3: i32,
         ) -> *mut std::ffi::c_void;
         fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
         fn CFRelease(cf: *mut std::ffi::c_void);
     }
 
+    let (wheel_vertical, wheel_horizontal) = scroll_wheel_deltas(delta_x, delta_y);
+
     unsafe {
         // units: 0 = pixel, 1 = line
-        let event = CGEventCreateScrollWheelEvent(
+        let event = CGEventCreateScrollWheelEvent2(
             std::ptr::null(),
             0, // kCGScrollEventUnitPixel
             2, // wheel_count
-            delta_y,
-            delta_x,
+            wheel_vertical,
+            wheel_horizontal,
+            0,
         );
 
         if event.is_null() {
@@ -221,6 +228,14 @@ pub fn scroll(x: f64, y: f64, delta_x: i32, delta_y: i32) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+/// Convert tool deltas (positive = down / right) to CGEvent wheel values
+/// `(wheel1, wheel2)`. For CGEvent, positive `wheel1` scrolls up and positive
+/// `wheel2` scrolls left, so both axes are negated. Natural scrolling does not
+/// change this for posted events.
+fn scroll_wheel_deltas(delta_x: i32, delta_y: i32) -> (i32, i32) {
+    (delta_y.saturating_neg(), delta_x.saturating_neg())
 }
 
 /// Map a key name to a CGKeyCode.
@@ -469,6 +484,24 @@ mod tests {
         assert!(key_name_to_code("return").is_some());
         assert!(key_name_to_code("f1").is_some());
         assert!(key_name_to_code("nonexistent").is_none());
+    }
+
+    #[test]
+    fn scroll_down_maps_to_negative_wheel1() {
+        // Measured on macOS 27 with natural scrolling on: a posted event with
+        // wheel1 = +50 moved the content up by 50 px (scrolled toward the top).
+        assert_eq!(scroll_wheel_deltas(0, 3), (-3, 0));
+    }
+
+    #[test]
+    fn scroll_right_maps_to_negative_wheel2() {
+        // Same measurement: wheel2 = +50 scrolled toward the left edge.
+        assert_eq!(scroll_wheel_deltas(4, 0), (0, -4));
+    }
+
+    #[test]
+    fn scroll_delta_extreme_does_not_overflow() {
+        assert_eq!(scroll_wheel_deltas(0, i32::MIN), (i32::MAX, 0));
     }
 
     #[test]

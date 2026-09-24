@@ -196,9 +196,11 @@ pub fn scroll(x: f64, y: f64, delta_x: i32, delta_y: i32) -> Result<(), String> 
     move_mouse(x, y)?;
     thread::sleep(Duration::from_millis(10));
 
+    let (wheel_vertical, wheel_horizontal) = scroll_wheel_deltas(delta_x, delta_y);
+
     // Vertical scroll
     if delta_y != 0 {
-        let input = make_mouse_input(0, 0, MOUSEEVENTF_WHEEL.0, delta_y * 120);
+        let input = make_mouse_input(0, 0, MOUSEEVENTF_WHEEL.0, wheel_vertical);
 
         unsafe {
             let result = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
@@ -210,7 +212,7 @@ pub fn scroll(x: f64, y: f64, delta_x: i32, delta_y: i32) -> Result<(), String> 
 
     // Horizontal scroll
     if delta_x != 0 {
-        let input = make_mouse_input(0, 0, MOUSEEVENTF_HWHEEL.0, delta_x * 120);
+        let input = make_mouse_input(0, 0, MOUSEEVENTF_HWHEEL.0, wheel_horizontal);
 
         unsafe {
             let result = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
@@ -221,6 +223,14 @@ pub fn scroll(x: f64, y: f64, delta_x: i32, delta_y: i32) -> Result<(), String> 
     }
 
     Ok(())
+}
+
+/// Convert tool deltas (positive = down / right) to `mouseData` values
+/// `(WHEEL, HWHEEL)` in `WHEEL_DELTA` (120) units. A positive `WHEEL` value
+/// scrolls up, so the vertical axis is negated; a positive `HWHEEL` value
+/// already scrolls right.
+fn scroll_wheel_deltas(delta_x: i32, delta_y: i32) -> (i32, i32) {
+    (delta_y.saturating_mul(-120), delta_x.saturating_mul(120))
 }
 
 /// Map a key name to a Windows virtual key code.
@@ -471,6 +481,18 @@ mod tests {
         assert!(key_name_to_vk("return").is_some());
         assert!(key_name_to_vk("f1").is_some());
         assert!(key_name_to_vk("nonexistent").is_none());
+    }
+
+    #[test]
+    fn scroll_down_maps_to_negative_wheel_delta() {
+        // MOUSEEVENTF_WHEEL: positive mouseData scrolls away from the user (up).
+        assert_eq!(scroll_wheel_deltas(0, 2), (-240, 0));
+    }
+
+    #[test]
+    fn scroll_right_maps_to_positive_hwheel_delta() {
+        // MOUSEEVENTF_HWHEEL: positive mouseData tilts to the right.
+        assert_eq!(scroll_wheel_deltas(1, 0), (0, 120));
     }
 
     #[test]
