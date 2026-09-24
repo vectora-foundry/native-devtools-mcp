@@ -834,3 +834,31 @@ async fn cdp_evaluate_script_accepts_same_origin_iframe_element_arg() {
         serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
     assert_eq!(value, serde_json::json!(["IframeBtn", true]));
 }
+
+/// An expression that only contains an arrow callback must be evaluated
+/// as is, not wrapped and called as a function.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_evaluates_expression_with_arrow_callback() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let result = cdp_evaluate_script(
+        "[1, 2].map(x => x * 2)".to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(value, serde_json::json!([2, 4]));
+}

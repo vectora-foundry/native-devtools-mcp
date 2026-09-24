@@ -6,6 +6,7 @@
 
 mod element_at_point;
 mod input;
+mod js_function;
 mod pages;
 mod script;
 

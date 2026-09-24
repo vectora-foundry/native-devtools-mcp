@@ -1,6 +1,7 @@
 //! CDP script and snapshot tools: evaluate_script, find_elements,
 //! take_dom_snapshot, wait_for.
 
+use super::js_function::is_function_expression;
 use crate::cdp::{cdp_error, page_url, CdpClient, CDP_REQUEST_TIMEOUT};
 use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, ResolveNodeParams,
@@ -127,15 +128,11 @@ pub async fn cdp_evaluate_script(
 
     if !has_uid_args {
         // Simple case: evaluate the expression directly.
-        // If it looks like a function declaration or arrow function, wrap as an IIFE
-        // so `() => document.title` returns the title, not the function object.
-        // Use `=>` presence to detect arrow functions — avoids false positives on
-        // parenthesized expressions like `(1 + 2)` or `({ title: document.title })`.
-        let trimmed = function.trim_start();
-        let is_function = trimmed.starts_with("function")
-            || trimmed.starts_with("async function")
-            || function.contains("=>");
-        let expression = if is_function {
+        // If the whole source is a function expression, call it as an IIFE so
+        // `() => document.title` returns the title, not the function object.
+        // Expressions that merely contain an arrow, like `[1, 2].map(x => x * 2)`,
+        // are evaluated as is.
+        let expression = if is_function_expression(&function) {
             format!("({})()", function)
         } else {
             function
