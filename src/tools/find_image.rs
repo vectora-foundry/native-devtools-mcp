@@ -18,7 +18,7 @@ use crate::tools::image_cache::ImageCache;
 use crate::tools::screenshot_cache::{ScreenshotCache, ScreenshotMetadata};
 use base64::Engine;
 use image::{GrayImage, ImageReader};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::io::Cursor;
@@ -315,7 +315,7 @@ pub async fn find_image(
 
     // Validate scale range to prevent infinite loops and degenerate cases
     if let Err(e) = validate_scale_range(&scales) {
-        return CallToolResult::error(vec![Content::text(e)]);
+        return CallToolResult::error(vec![ContentBlock::text(e)]);
     }
 
     // Validate, filter, and normalize rotations to exact {0, 90, 180, 270}
@@ -352,7 +352,7 @@ pub async fn find_image(
     // Validate search_region dimensions
     if let Some(region) = &params.search_region {
         if region.w == 0 || region.h == 0 {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "search_region width and height must be positive",
             )]);
         }
@@ -391,7 +391,7 @@ pub async fn find_image(
                 warning = Some(warning.map_or(msg.clone(), |w| format!("{}; {}", w, msg)));
                 None
             } else {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "Template ID '{}' not found in image cache",
                     id
                 ))]);
@@ -414,7 +414,7 @@ pub async fn find_image(
                 warning = Some(warning.map_or(msg.clone(), |w| format!("{}; {}", w, msg)));
                 None
             } else {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "Mask ID '{}' not found in image cache",
                     id
                 ))]);
@@ -426,7 +426,7 @@ pub async fn find_image(
 
     // Validate that we have a template source
     if params.template_id.is_none() && params.template_image_base64.is_none() {
-        return CallToolResult::error(vec![Content::text(
+        return CallToolResult::error(vec![ContentBlock::text(
             "Either template_id or template_image_base64 must be provided",
         )]);
     }
@@ -460,14 +460,14 @@ pub async fn find_image(
         MatchingResult::Success(matches) => {
             let response = FindImageResponse { matches, warning };
             match serde_json::to_string_pretty(&response) {
-                Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-                Err(e) => CallToolResult::error(vec![Content::text(format!(
+                Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+                Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to serialize response: {}",
                     e
                 ))]),
             }
         }
-        MatchingResult::Error(e) => CallToolResult::error(vec![Content::text(e)]),
+        MatchingResult::Error(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
     }
 }
 
@@ -1565,8 +1565,8 @@ mod tests {
         let result = find_image(params, screenshot_cache, image_cache).await;
         assert!(result.is_error.unwrap_or(false));
         // Check error message mentions template ID
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             assert!(text.contains("Template ID") && text.contains("not found"));
         }
@@ -1611,8 +1611,8 @@ mod tests {
         let result = find_image(params, screenshot_cache, image_cache).await;
         assert!(result.is_error.unwrap_or(false));
         // Check error message mentions mask ID
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             assert!(text.contains("Mask ID") && text.contains("not found"));
         }
@@ -1644,8 +1644,8 @@ mod tests {
 
         let result = find_image(params, screenshot_cache, image_cache).await;
         assert!(result.is_error.unwrap_or(false));
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             assert!(text.contains("template_id") || text.contains("template_image_base64"));
         }
@@ -1729,8 +1729,8 @@ mod tests {
         );
 
         // Parse response and verify we got a match
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             let response: FindImageResponse = serde_json::from_str(text).unwrap();
             assert!(
@@ -1791,8 +1791,8 @@ mod tests {
         );
 
         // Verify warning is present
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             let response: FindImageResponse = serde_json::from_str(text).unwrap();
             assert!(
@@ -1851,8 +1851,8 @@ mod tests {
         );
 
         // Verify warning is present
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             let response: FindImageResponse = serde_json::from_str(text).unwrap();
             assert!(
@@ -1906,8 +1906,8 @@ mod tests {
         );
 
         // Verify error message mentions dimension mismatch
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &result.content[0].raw
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) =
+            &result.content[0]
         {
             assert!(
                 text.contains("Mask dimensions") && text.contains("must match"),

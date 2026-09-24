@@ -12,7 +12,7 @@ use chromiumoxide::cdp::js_protocol::runtime::{
 };
 use chromiumoxide::error::CdpError;
 use chromiumoxide::page::Page;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -418,7 +418,7 @@ async fn element_uid_args(
 }
 
 fn pretty_json_result(value: &Value) -> CallToolResult {
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string()),
     )])
 }
@@ -483,13 +483,13 @@ pub async fn cdp_wait_for(
             let elapsed_ms = start.elapsed().as_millis();
             let header = format!("Text appeared after {}ms: {}", elapsed_ms, texts_json);
             if !include_snapshot {
-                return CallToolResult::success(vec![Content::text(header)]);
+                return CallToolResult::success(vec![ContentBlock::text(header)]);
             }
             // Smaller cap than the user-facing default: cdp_wait_for is
             // typically followed by a targeted cdp_find_elements, so a
             // lightweight snapshot is enough to show what appeared.
             let mut result = cdp_take_dom_snapshot(Some(100), cdp_client.clone()).await;
-            result.content.insert(0, Content::text(header));
+            result.content.insert(0, ContentBlock::text(header));
             return result;
         }
 
@@ -907,11 +907,11 @@ pub async fn cdp_wait_for_page_change(
         decorate_semantic_wait_result(value, scope_uid.as_deref(), &condition, goal.as_deref());
     let result_text = serde_json::to_string_pretty(&result).unwrap_or_default();
     if !include_snapshot {
-        return CallToolResult::success(vec![Content::text(result_text)]);
+        return CallToolResult::success(vec![ContentBlock::text(result_text)]);
     }
 
     let mut snapshot = cdp_take_dom_snapshot(Some(100), cdp_client.clone()).await;
-    snapshot.content.insert(0, Content::text(result_text));
+    snapshot.content.insert(0, ContentBlock::text(result_text));
     snapshot
 }
 
@@ -1305,7 +1305,7 @@ pub async fn cdp_summarize_page(cdp_client: Arc<RwLock<Option<CdpClient>>>) -> C
         "inventory": inventory,
     });
 
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     )])
 }
@@ -1382,7 +1382,7 @@ pub async fn cdp_get_element_context(
         "live_context": live_context,
     });
 
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     )])
 }
@@ -1434,7 +1434,7 @@ pub async fn cdp_find_elements(
         "inventory": inventory,
     });
 
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     )])
 }
@@ -1472,7 +1472,7 @@ pub async fn cdp_take_dom_snapshot(
     let output = crate::cdp::dom_discovery::format_dom_snapshot(&candidates);
     client.last_dom_snapshot = Some(snapshot_map);
 
-    CallToolResult::success(vec![Content::text(output)])
+    CallToolResult::success(vec![ContentBlock::text(output)])
 }
 
 #[cfg(test)]

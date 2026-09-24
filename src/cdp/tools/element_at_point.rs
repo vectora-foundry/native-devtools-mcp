@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use chromiumoxide::cdp::browser_protocol::dom::{DescribeNodeParams, GetNodeForLocationParams};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::cdp::{CdpClient, SnapshotMap};
 
@@ -16,7 +16,7 @@ pub async fn cdp_element_at_point(
     let client = match client_guard.as_ref() {
         Some(c) => c,
         None => {
-            return CallToolResult::error(vec![Content::text(
+            return CallToolResult::error(vec![ContentBlock::text(
                 "No CDP connection. Use cdp_connect first.",
             )])
         }
@@ -30,7 +30,7 @@ pub async fn cdp_element_at_point(
     // Step 1: Query window geometry and scroll offsets.
     let geo = match query_window_geometry(&page).await {
         Ok(g) => g,
-        Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+        Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
     };
 
     // Step 2: Convert screen coords to viewport and page coords.
@@ -43,7 +43,7 @@ pub async fn cdp_element_at_point(
         || viewport_x >= geo.inner_width
         || viewport_y >= geo.inner_height
     {
-        return CallToolResult::error(vec![Content::text(format!(
+        return CallToolResult::error(vec![ContentBlock::text(format!(
             "Screen point ({}, {}) maps to viewport ({:.0}, {:.0}) which is outside \
              content area ({}x{}). The point may be in the title bar or outside the window.",
             x, y, viewport_x, viewport_y, geo.inner_width, geo.inner_height,
@@ -61,7 +61,7 @@ pub async fn cdp_element_at_point(
             match element_from_point_fallback(&page, viewport_x, viewport_y).await {
                 Ok(id) => id,
                 Err(e) => {
-                    return CallToolResult::error(vec![Content::text(format!(
+                    return CallToolResult::error(vec![ContentBlock::text(format!(
                         "No element found at screen ({}, {}) / viewport ({:.0}, {:.0}): {}",
                         x, y, viewport_x, viewport_y, e,
                     ))]);
@@ -80,7 +80,7 @@ pub async fn cdp_element_at_point(
                 "name": name,
                 "backend_node_id": backend_node_id,
             });
-            return CallToolResult::success(vec![Content::text(
+            return CallToolResult::success(vec![ContentBlock::text(
                 serde_json::to_string_pretty(&json).unwrap_or_default(),
             )]);
         }
@@ -99,7 +99,7 @@ pub async fn cdp_element_at_point(
         "backend_node_id": backend_node_id,
         "note": note,
     });
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&json).unwrap_or_default(),
     )])
 }

@@ -21,7 +21,7 @@ cdp = ["dep:chromiumoxide"]
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "3.4", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }

@@ -4,7 +4,7 @@
 //! blocking the tokio runtime, since input operations use `thread::sleep`.
 
 use crate::platform::{display, input, ocr};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Deserialize;
 
 /// Check accessibility permission and return a standardized plain-text error
@@ -27,7 +27,7 @@ pub(crate) fn check_permission() -> Option<CallToolResult> {
              This typically occurs when targeting elevated (admin) windows \
              from a non-elevated process, or when targeting secure desktops.";
 
-        return Some(CallToolResult::error(vec![Content::text(msg)]));
+        return Some(CallToolResult::error(vec![ContentBlock::text(msg)]));
     }
     None
 }
@@ -38,11 +38,11 @@ where
     F: FnOnce() -> Result<(), String> + Send + 'static,
 {
     match tokio::task::spawn_blocking(op).await {
-        Ok(Ok(())) => CallToolResult::success(vec![Content::text(success_msg)]),
+        Ok(Ok(())) => CallToolResult::success(vec![ContentBlock::text(success_msg)]),
         Ok(Err(e)) => {
-            CallToolResult::error(vec![Content::text(format!("{}: {}", error_prefix, e))])
+            CallToolResult::error(vec![ContentBlock::text(format!("{}: {}", error_prefix, e))])
         }
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Task failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Task failed: {}", e))]),
     }
 }
 
@@ -419,7 +419,7 @@ pub async fn click(params: ClickParams) -> CallToolResult {
     // the first complete branch on a mixed payload — now we reject it.
     let variant = match select_click_variant(&params) {
         Ok(v) => v,
-        Err(msg) => return CallToolResult::error(vec![Content::text(msg)]),
+        Err(msg) => return CallToolResult::error(vec![ContentBlock::text(msg)]),
     };
 
     // Resolve coordinates based on the validated variant.
@@ -439,12 +439,12 @@ pub async fn click(params: ClickParams) -> CallToolResult {
             let window = match crate::platform::find_window_by_id(window_id) {
                 Ok(Some(w)) => w,
                 Ok(None) => {
-                    return CallToolResult::error(vec![Content::text(format!(
+                    return CallToolResult::error(vec![ContentBlock::text(format!(
                         "Window {} not found",
                         window_id
                     ))])
                 }
-                Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
             };
             let bounds = display::WindowBounds {
                 x: window.bounds.x,
@@ -487,12 +487,12 @@ pub async fn click(params: ClickParams) -> CallToolResult {
             let window = match crate::platform::find_window_by_id(window_id) {
                 Ok(Some(w)) => w,
                 Ok(None) => {
-                    return CallToolResult::error(vec![Content::text(format!(
+                    return CallToolResult::error(vec![ContentBlock::text(format!(
                         "Window {} not found",
                         window_id
                     ))])
                 }
-                Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
             };
             let bounds = display::WindowBounds {
                 x: window.bounds.x,
@@ -689,13 +689,13 @@ pub struct GetDisplaysParams {}
 pub fn get_displays(_params: GetDisplaysParams) -> CallToolResult {
     match display::get_displays() {
         Ok(displays) => match serde_json::to_string_pretty(&displays) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => CallToolResult::error(vec![Content::text(format!(
+            Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                 "Failed to serialize displays: {}",
                 e
             ))]),
         },
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
             "Failed to get displays: {}",
             e
         ))]),
@@ -731,13 +731,13 @@ pub fn find_text(params: FindTextParams) -> CallToolResult {
         (None, Some(app_name)) => match crate::platform::find_windows_by_app(app_name) {
             Ok(windows) if !windows.is_empty() => Some(windows[0].id),
             Ok(_) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "No window found for app '{}'",
                     app_name
                 ))]);
             }
             Err(e) => {
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to find window: {}",
                     e
                 ))]);
@@ -788,7 +788,7 @@ pub fn find_text(params: FindTextParams) -> CallToolResult {
     match ocr_result {
         Ok(ref matches) if !matches.is_empty() => serialize_matches(matches),
         Ok(_) => empty_result_with_available_elements(&params.text, window_id, debug),
-        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
     }
 }
 
@@ -807,12 +807,13 @@ pub fn element_at_point(params: ElementAtPointParams) -> CallToolResult {
     let result = element_at_point_platform(params.x, params.y, params.app_name.as_deref());
     match result {
         Ok(value) => match serde_json::to_string_pretty(&value) {
-            Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-            Err(e) => {
-                CallToolResult::error(vec![Content::text(format!("Failed to serialize: {}", e))])
-            }
+            Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+                "Failed to serialize: {}",
+                e
+            ))]),
         },
-        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
     }
 }
 
@@ -884,7 +885,7 @@ fn empty_result_with_available_elements(
     window_id: Option<u32>,
     debug: bool,
 ) -> CallToolResult {
-    let mut content = vec![Content::text("[]")];
+    let mut content = vec![ContentBlock::text("[]")];
 
     match list_element_names_accessibility(window_id) {
         Ok(names) => {
@@ -894,7 +895,7 @@ fn empty_result_with_available_elements(
                     names.len()
                 );
             }
-            content.push(Content::text(build_no_matches_hint(search, &names)));
+            content.push(ContentBlock::text(build_no_matches_hint(search, &names)));
         }
         Err(e) if debug => {
             eprintln!("[DEBUG find_text] failed to list element names: {}", e);
@@ -971,8 +972,11 @@ fn is_interactive_role(role: &str) -> bool {
 
 fn serialize_matches(matches: &[ocr::TextMatch]) -> CallToolResult {
     match serde_json::to_string_pretty(matches) {
-        Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed to serialize: {}", e))]),
+        Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+            "Failed to serialize: {}",
+            e
+        ))]),
     }
 }
 

@@ -10,7 +10,7 @@ use chromiumoxide::browser::Browser;
 use chromiumoxide::handler::HandlerConfig;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use std::collections::HashMap;
 use tokio::task::JoinHandle;
 
@@ -166,7 +166,7 @@ async fn poll_for_page(
 
 /// Shorthand for building a CDP tool error result.
 pub fn cdp_error(msg: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(msg.into())])
+    CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
 /// Maps snapshot UIDs to CDP node identifiers for click/eval resolution.

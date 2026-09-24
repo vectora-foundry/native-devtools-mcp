@@ -1,5 +1,5 @@
 use crate::platform;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ pub fn probe_app(params: ProbeAppParams) -> CallToolResult {
         }
     };
 
-    CallToolResult::success(vec![Content::text(
+    CallToolResult::success(vec![ContentBlock::text(
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Serialize error: {}", e)),
     )])
 }

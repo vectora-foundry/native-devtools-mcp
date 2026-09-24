@@ -7,7 +7,7 @@ use chromiumoxide::cdp::browser_protocol::input::{
     InsertTextParams, MouseButton,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{CallArgument, CallFunctionOnParams};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -109,7 +109,7 @@ pub async fn cdp_click(
     }
 
     let dbl_note = if dbl_click { " (double-click)" } else { "" };
-    let result = CallToolResult::success(vec![Content::text(format!(
+    let result = CallToolResult::success(vec![ContentBlock::text(format!(
         "Clicked uid={} '{}' ({}) at ({:.1}, {:.1}){}",
         uid, node_name, node_role, cx, cy, dbl_note
     ))]);
@@ -144,7 +144,7 @@ pub async fn cdp_hover(
         return cdp_error(format!("Hover failed on uid={}: {}", uid, e));
     }
 
-    let result = CallToolResult::success(vec![Content::text(format!(
+    let result = CallToolResult::success(vec![ContentBlock::text(format!(
         "Hovered uid={} '{}' ({}) at ({:.1}, {:.1})",
         uid, node_name, node_role, cx, cy
     ))]);
@@ -367,7 +367,7 @@ pub async fn cdp_fill(
         ""
     };
 
-    let result = CallToolResult::success(vec![Content::text(format!(
+    let result = CallToolResult::success(vec![ContentBlock::text(format!(
         "Filled uid={} '{}' ({}) with '{}' (strategy={}, {}{})",
         uid, node_name, node_role, value, strategy, observed, rich_hint
     ))]);
@@ -655,7 +655,7 @@ pub async fn cdp_press_key(
         let _ = page.execute(params).await;
     }
 
-    let result = CallToolResult::success(vec![Content::text(format!("Pressed key: {}", key))]);
+    let result = CallToolResult::success(vec![ContentBlock::text(format!("Pressed key: {}", key))]);
     finish_after_action(result, include_snapshot, cdp_client).await
 }
 
@@ -709,7 +709,7 @@ pub async fn cdp_type_text(
         .map(|k| format!(" + {}", k))
         .unwrap_or_default();
     invalidate_snapshot_cache(cdp_client).await;
-    CallToolResult::success(vec![Content::text(format!(
+    CallToolResult::success(vec![ContentBlock::text(format!(
         "Typed text \"{}{}\"",
         text, suffix
     ))])

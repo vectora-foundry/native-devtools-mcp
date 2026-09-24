@@ -1,5 +1,5 @@
 use crate::app_protocol::AppProtocolClient;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::service::{Peer, RoleServer};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -155,7 +155,10 @@ pub async fn app_connect(
     let new_client = match AppProtocolClient::connect(&params.url).await {
         Ok(c) => c,
         Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!("Failed to connect: {}", e))])
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "Failed to connect: {}",
+                e
+            ))])
         }
     };
 
@@ -171,7 +174,7 @@ pub async fn app_connect(
                 } else {
                     ""
                 };
-                return CallToolResult::error(vec![Content::text(format!(
+                return CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to get app info for validation: {}.{}",
                     e, existing_note
                 ))]);
@@ -179,7 +182,7 @@ pub async fn app_connect(
             // No expectations, proceed without info
             *client.write().await = Some(new_client);
             let _ = peer.notify_tool_list_changed().await;
-            return CallToolResult::success(vec![Content::text(format!(
+            return CallToolResult::success(vec![ContentBlock::text(format!(
                 "Connected to {}. App debug tools (app_*) are now available. {}",
                 params.url, RELIST_HINT
             ))]);
@@ -206,7 +209,7 @@ pub async fn app_connect(
             } else {
                 ""
             };
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "Identity mismatch: connected to \"{}\" (bundleId \"{}\"), but expected bundleId \"{}\".{}",
                 actual_app_name, actual, expected, existing_note
             ))]);
@@ -222,7 +225,7 @@ pub async fn app_connect(
             } else {
                 ""
             };
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "Identity mismatch: connected to \"{}\" (bundleId \"{}\"), but expected app name \"{}\".{}",
                 actual, actual_bundle_id, expected, existing_note
             ))]);
@@ -238,17 +241,17 @@ pub async fn app_connect(
         RELIST_HINT,
         serde_json::to_string_pretty(&info).unwrap_or_default()
     );
-    CallToolResult::success(vec![Content::text(msg)])
+    CallToolResult::success(vec![ContentBlock::text(msg)])
 }
 
 pub async fn app_disconnect(client: SharedClient, peer: Peer<RoleServer>) -> CallToolResult {
     if client.write().await.take().is_some() {
         let _ = peer.notify_tool_list_changed().await;
-        CallToolResult::success(vec![Content::text(
+        CallToolResult::success(vec![ContentBlock::text(
             "Disconnected. App debug tools (app_*) are no longer available.",
         )])
     } else {
-        CallToolResult::error(vec![Content::text("Not connected to any app")])
+        CallToolResult::error(vec![ContentBlock::text("Not connected to any app")])
     }
 }
 
@@ -259,36 +262,42 @@ async fn get_client(shared: &SharedClient) -> Option<AppProtocolClient> {
 
 pub async fn app_get_info(client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.get_runtime_info().await {
-        Ok(info) => CallToolResult::success(vec![Content::text(
+        Ok(info) => CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".to_string()),
         )]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_get_tree(params: AppGetTreeParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client
         .get_tree(params.depth, params.root_id.as_deref())
         .await
     {
-        Ok(tree) => CallToolResult::success(vec![Content::text(
+        Ok(tree) => CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&tree).unwrap_or_else(|_| "{}".to_string()),
         )]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_query(params: AppQueryParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     let result = if params.all {
@@ -298,43 +307,49 @@ pub async fn app_query(params: AppQueryParams, client: SharedClient) -> CallTool
     };
 
     match result {
-        Ok(elements) => CallToolResult::success(vec![Content::text(
+        Ok(elements) => CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&elements).unwrap_or_else(|_| "{}".to_string()),
         )]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_get_element(params: AppGetElementParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.get_element(&params.element_id).await {
-        Ok(element) => CallToolResult::success(vec![Content::text(
+        Ok(element) => CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&element).unwrap_or_else(|_| "{}".to_string()),
         )]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_click(params: AppClickParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.click(&params.element_id, params.click_count).await {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!(
+        Ok(_) => CallToolResult::success(vec![ContentBlock::text(format!(
             "Clicked element: {}",
             params.element_id
         ))]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_type(params: AppTypeParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client
@@ -345,39 +360,49 @@ pub async fn app_type(params: AppTypeParams, client: SharedClient) -> CallToolRe
         )
         .await
     {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!("Typed: {}", params.text))]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Ok(_) => {
+            CallToolResult::success(vec![ContentBlock::text(format!("Typed: {}", params.text))])
+        }
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_press_key(params: AppPressKeyParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.press_key(&params.key, params.modifiers).await {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!("Pressed: {}", params.key))]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Ok(_) => {
+            CallToolResult::success(vec![ContentBlock::text(format!("Pressed: {}", params.key))])
+        }
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_focus(params: AppFocusParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.focus(&params.element_id).await {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!(
+        Ok(_) => CallToolResult::success(vec![ContentBlock::text(format!(
             "Focused element: {}",
             params.element_id
         ))]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_screenshot(params: AppScreenshotParams, client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.get_screenshot(params.element_id.as_deref()).await {
@@ -388,27 +413,29 @@ pub async fn app_screenshot(params: AppScreenshotParams, client: SharedClient) -
                 let height = result.get("height").and_then(|v| v.as_i64()).unwrap_or(0);
 
                 CallToolResult::success(vec![
-                    Content::text(format!("Screenshot: {}x{}", width, height)),
-                    Content::image(data, "image/png"),
+                    ContentBlock::text(format!("Screenshot: {}x{}", width, height)),
+                    ContentBlock::image(data, "image/png"),
                 ])
             } else {
-                CallToolResult::error(vec![Content::text("Invalid screenshot response")])
+                CallToolResult::error(vec![ContentBlock::text("Invalid screenshot response")])
             }
         }
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
 pub async fn app_list_windows(client: SharedClient) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.list_windows().await {
-        Ok(windows) => CallToolResult::success(vec![Content::text(
+        Ok(windows) => CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&windows).unwrap_or_else(|_| "{}".to_string()),
         )]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }
 
@@ -417,14 +444,16 @@ pub async fn app_focus_window(
     client: SharedClient,
 ) -> CallToolResult {
     let Some(client) = get_client(&client).await else {
-        return CallToolResult::error(vec![Content::text("Not connected. Use app_connect first.")]);
+        return CallToolResult::error(vec![ContentBlock::text(
+            "Not connected. Use app_connect first.",
+        )]);
     };
 
     match client.focus_window(&params.window_id).await {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!(
+        Ok(_) => CallToolResult::success(vec![ContentBlock::text(format!(
             "Focused window: {}",
             params.window_id
         ))]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!("Failed: {}", e))]),
     }
 }

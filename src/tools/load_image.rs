@@ -9,7 +9,7 @@ use crate::tools::image_cache::{
 };
 use base64::Engine;
 use image::{DynamicImage, GenericImageView, ImageReader};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -84,12 +84,12 @@ struct ProcessingResult {
 pub async fn load_image(params: LoadImageParams, cache: Arc<RwLock<ImageCache>>) -> CallToolResult {
     // Validate max_width/max_height are positive if provided
     if let Some(0) = params.max_width {
-        return CallToolResult::error(vec![Content::text(
+        return CallToolResult::error(vec![ContentBlock::text(
             "max_width must be greater than 0".to_string(),
         )]);
     }
     if let Some(0) = params.max_height {
-        return CallToolResult::error(vec![Content::text(
+        return CallToolResult::error(vec![ContentBlock::text(
             "max_height must be greater than 0".to_string(),
         )]);
     }
@@ -106,9 +106,12 @@ pub async fn load_image(params: LoadImageParams, cache: Arc<RwLock<ImageCache>>)
     // Move heavy CPU work to a blocking thread
     let result = match tokio::task::spawn_blocking(move || process_image(input)).await {
         Ok(Ok(result)) => result,
-        Ok(Err(e)) => return CallToolResult::error(vec![Content::text(e)]),
+        Ok(Err(e)) => return CallToolResult::error(vec![ContentBlock::text(e)]),
         Err(e) => {
-            return CallToolResult::error(vec![Content::text(format!("Task panicked: {}", e))]);
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "Task panicked: {}",
+                e
+            ))]);
         }
     };
 
@@ -134,8 +137,8 @@ pub async fn load_image(params: LoadImageParams, cache: Arc<RwLock<ImageCache>>)
     };
 
     match serde_json::to_string_pretty(&response) {
-        Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
+        Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
             "Failed to serialize response: {}",
             e
         ))]),
@@ -443,9 +446,7 @@ mod tests {
 
         // Parse the response to get image_id
         let content = &result.content[0];
-        if let rmcp::model::RawContent::Text(rmcp::model::RawTextContent { text, .. }) =
-            &content.raw
-        {
+        if let rmcp::model::ContentBlock::Text(rmcp::model::TextContent { text, .. }) = &content {
             let response: LoadImageResponse = serde_json::from_str(text).unwrap();
             assert!(response.image_id.starts_with("template-"));
 
