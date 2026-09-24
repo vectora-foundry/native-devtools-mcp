@@ -7,6 +7,7 @@ pub mod dom_discovery;
 pub mod tools;
 
 use chromiumoxide::browser::Browser;
+use chromiumoxide::handler::HandlerConfig;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
 use rmcp::model::{CallToolResult, Content};
@@ -14,6 +15,26 @@ use std::collections::HashMap;
 use tokio::task::JoinHandle;
 
 pub const DOM_UID_PREFIX: &str = "d";
+
+/// Request timeout handed to the chromiumoxide handler
+/// (`HandlerConfig::request_timeout`).
+///
+/// chromiumoxide defaults to 30 s, shorter than the longest wait a tool may
+/// ask the page to run (`cdp_wait_for_page_change` accepts up to 55 s).
+///
+/// What this value does and does not do in chromiumoxide 0.9.1:
+/// - It applies only to calls sent through `Page::evaluate_expression` /
+///   `Page::evaluate_function`. `Page::execute` arms its own fixed 30 s
+///   timer that ignores this setting, so calls that can await a long page
+///   promise use the evaluate APIs (see `tools::script`).
+/// - The handler checks for timed-out requests on a periodic job whose
+///   period is this same value. A request that never gets an answer is
+///   therefore failed between 65 s and about 130 s after it was sent.
+///
+/// This is a backstop only. Every long call is also bounded by its tool
+/// with `tokio::time::timeout` (the tool's own limit plus a small margin),
+/// and those limits are all below 65 s.
+pub const CDP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
 
 /// CDP client state, owned by the MCP server.
 pub struct CdpClient {
@@ -38,7 +59,11 @@ impl CdpClient {
     /// chromiumoxide handler loop, and auto-selects the first non-extension page.
     pub async fn connect(port: u16) -> Result<Self, String> {
         let url = format!("http://127.0.0.1:{}", port);
-        let (mut browser, mut handler) = Browser::connect(&url)
+        let handler_config = HandlerConfig {
+            request_timeout: CDP_REQUEST_TIMEOUT,
+            ..HandlerConfig::default()
+        };
+        let (mut browser, mut handler) = Browser::connect_with_config(&url, handler_config)
             .await
             .map_err(|e| format!("Cannot connect to port {}. Is the app running with --remote-debugging-port? Error: {}", port, e))?;
 

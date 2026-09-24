@@ -645,3 +645,357 @@ fn assert_matches_label(result: &rmcp::model::CallToolResult, expected: &str) {
         "no entry in `matches` with label={expected:?}; body:\n{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Calls that stay in flight longer than chromiumoxide's default 30 s request
+// timeout. `cdp_wait_for_page_change` accepts waits up to 55 s and
+// `cdp_evaluate_script` awaits page promises; both must return their own
+// result instead of a generic transport timeout once 30 s pass.
+// These take 35-40 s each.
+// ---------------------------------------------------------------------------
+
+const HTML_QUIET_MESSAGE_LOG: &str = r##"
+<!doctype html>
+<html>
+<body>
+  <section role="log" aria-label="Messages" tabindex="0"><p>nothing new here</p></section>
+</body>
+</html>
+"##;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome and takes ~35 s — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_awaits_promise_that_settles_after_30_seconds() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let result = cdp_evaluate_script(
+        "() => new Promise(resolve => setTimeout(() => resolve('settled late'), 35000))"
+            .to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    assert_eq!(content_text(&result).trim(), "\"settled late\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome and takes ~40 s — run with `cargo test -- --ignored`"]
+async fn cdp_wait_for_page_change_reports_own_timeout_after_40_seconds() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let waited = cdp_wait_for_page_change(
+        None,
+        None,
+        None,
+        Some(40_000),
+        Some(500),
+        Some(100),
+        false,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(waited.is_error, Some(false), "wait failed: {:?}", waited);
+    let body = content_text(&waited);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("wait returns JSON");
+    assert_eq!(json["changed"].as_bool(), Some(false));
+    assert_eq!(json["timed_out"].as_bool(), Some(true));
+    assert_eq!(json["timeout_ms"].as_u64(), Some(40_000));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome and takes ~40 s — run with `cargo test -- --ignored`"]
+async fn cdp_wait_for_page_change_scoped_reports_own_timeout_after_40_seconds() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let uid = find_messages_log_uid(&h).await;
+
+    let waited = cdp_wait_for_page_change(
+        Some(uid.clone()),
+        None,
+        None,
+        Some(40_000),
+        Some(500),
+        Some(100),
+        false,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(waited.is_error, Some(false), "wait failed: {:?}", waited);
+    let body = content_text(&waited);
+    let json: serde_json::Value = serde_json::from_str(&body).expect("wait returns JSON");
+    assert_eq!(json["timed_out"].as_bool(), Some(true));
+    assert_eq!(json["timeout_ms"].as_u64(), Some(40_000));
+    assert_eq!(json["scope"]["uid"].as_str(), Some(uid.as_str()));
+    assert_eq!(json["after"]["root"]["role"].as_str(), Some("log"));
+}
+
+/// Element arguments are passed in the page's main-world context. The
+/// function must still see the first element as `this` and receive every
+/// element as an argument.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_with_element_args_binds_this_to_first_element() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+    let uid = find_messages_log_uid(&h).await;
+
+    let result = cdp_evaluate_script(
+        "function(el) { return [this === el, arguments.length, el.getAttribute('aria-label')]; }"
+            .to_string(),
+        Some(vec![serde_json::json!({ "uid": uid })]),
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(value, serde_json::json!([true, 1, "Messages"]));
+}
+
+async fn find_messages_log_uid(h: &Harness) -> String {
+    let found = cdp_find_elements(
+        "Messages".into(),
+        Some("log".into()),
+        Some(10),
+        h.client_handle(),
+    )
+    .await;
+    let found_json: serde_json::Value =
+        serde_json::from_str(&content_text(&found)).expect("find_elements returns JSON");
+    found_json["matches"][0]["uid"]
+        .as_str()
+        .expect("Messages log uid")
+        .to_string()
+}
+
+/// Element arguments run in the realm of the element's own frame. For an
+/// element inside a same-origin iframe, `document`, `location` and
+/// `instanceof` must refer to the iframe, not the top page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_runs_iframe_element_arg_in_iframe_realm() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_SHADOW_AND_IFRAME).await;
+    let uid = find_iframe_button_uid(&h).await;
+
+    let result = cdp_evaluate_script(
+        "(el) => [el.textContent, el.ownerDocument === document, el instanceof HTMLElement, location.href]"
+            .to_string(),
+        Some(vec![serde_json::json!({ "uid": uid })]),
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(
+        value,
+        serde_json::json!(["IframeBtn", true, true, "about:srcdoc"])
+    );
+}
+
+/// A scoped page-change wait on an element inside a same-origin iframe
+/// observes the iframe document, so it reports the iframe's URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_wait_for_page_change_scoped_to_iframe_element_uses_iframe_realm() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_SHADOW_AND_IFRAME).await;
+    let uid = find_iframe_button_uid(&h).await;
+
+    let waited = cdp_wait_for_page_change(
+        Some(uid.clone()),
+        None,
+        None,
+        Some(1_000),
+        Some(100),
+        Some(100),
+        false,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(waited.is_error, Some(false), "wait failed: {:?}", waited);
+    let json: serde_json::Value =
+        serde_json::from_str(&content_text(&waited)).expect("wait returns JSON");
+    assert_eq!(json["page_url"].as_str(), Some("about:srcdoc"));
+    assert_eq!(json["after"]["root"]["tag"].as_str(), Some("button"));
+}
+
+async fn find_iframe_button_uid(h: &Harness) -> String {
+    let found = cdp_find_elements(
+        "IframeBtn".into(),
+        Some("button".into()),
+        Some(10),
+        h.client_handle(),
+    )
+    .await;
+    let found_json: serde_json::Value =
+        serde_json::from_str(&content_text(&found)).expect("find_elements returns JSON");
+    found_json["matches"][0]["uid"]
+        .as_str()
+        .expect("IframeBtn uid")
+        .to_string()
+}
+
+/// An expression that only contains an arrow callback must be evaluated
+/// as is, not wrapped and called as a function.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_evaluates_expression_with_arrow_callback() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let result = cdp_evaluate_script(
+        "[1, 2].map(x => x * 2)".to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(value, serde_json::json!([2, 4]));
+}
+
+/// A promise that never settles must end with the tool's own timeout, not
+/// hang until chromiumoxide's periodic eviction (up to ~130 s).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome and takes ~60 s — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_times_out_promise_that_never_settles() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+
+    let started = std::time::Instant::now();
+    let result = cdp_evaluate_script(
+        "() => new Promise(() => {})".to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "expected timeout: {:?}",
+        result
+    );
+    assert_eq!(
+        content_text(&result),
+        "Failed to evaluate script: no result within 60 s"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(64),
+        "timed out too late: {:?}",
+        elapsed
+    );
+}
+
+/// An iframe added after the page loaded. chromiumoxide may or may not have
+/// its context tracked by the time of the call, so this covers whichever
+/// path is taken: the element must still run in the iframe's realm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_runs_late_iframe_element_arg_in_iframe_realm() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+    let added = cdp_evaluate_script(
+        r#"() => new Promise(resolve => {
+            const frame = document.createElement('iframe');
+            frame.srcdoc = '<button aria-label="LateBtn">LateBtn</button>';
+            frame.onload = () => resolve(true);
+            document.body.appendChild(frame);
+        })"#
+        .to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+    assert_eq!(
+        added.is_error,
+        Some(false),
+        "add iframe failed: {:?}",
+        added
+    );
+
+    let found = cdp_find_elements(
+        "LateBtn".into(),
+        Some("button".into()),
+        Some(10),
+        h.client_handle(),
+    )
+    .await;
+    let found_json: serde_json::Value =
+        serde_json::from_str(&content_text(&found)).expect("find_elements returns JSON");
+    let uid = found_json["matches"][0]["uid"]
+        .as_str()
+        .expect("LateBtn uid")
+        .to_string();
+
+    let result = cdp_evaluate_script(
+        "(el) => new Promise(resolve => setTimeout(() => resolve([el.textContent, location.href, el instanceof HTMLElement]), 10))"
+            .to_string(),
+        Some(vec![serde_json::json!({ "uid": uid })]),
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(value, serde_json::json!(["LateBtn", "about:srcdoc", true]));
+}
