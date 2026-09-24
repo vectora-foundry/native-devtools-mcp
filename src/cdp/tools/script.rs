@@ -7,13 +7,14 @@ use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, ResolveNodeParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectParams,
-    RemoteObjectId,
+    CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId,
+    ReleaseObjectGroupParams, ReleaseObjectParams, RemoteObjectId, RemoteObjectSubtype,
 };
 use chromiumoxide::error::CdpError;
 use chromiumoxide::page::Page;
 use rmcp::model::{CallToolResult, Content};
 use serde_json::Value;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -48,18 +49,25 @@ impl JsCallError {
     }
 }
 
-impl From<CdpError> for JsCallError {
-    fn from(err: CdpError) -> Self {
+impl JsCallError {
+    /// Map a chromiumoxide error. `request_limit` is the request timeout of
+    /// the path the call took, named in the message if the call timed out.
+    fn from_cdp(err: CdpError, request_limit: Duration) -> Self {
         match err {
             CdpError::JavascriptException(details) => Self::Exception(details.text),
             CdpError::Timeout => Self::Transport(format!(
                 "no response within the {} s CDP request timeout",
-                CDP_REQUEST_TIMEOUT.as_secs()
+                request_limit.as_secs()
             )),
             other => Self::Transport(other.to_string()),
         }
     }
 }
+
+/// Fixed request timeout of chromiumoxide's `Page::execute`, which ignores
+/// `HandlerConfig::request_timeout`.
+const EXECUTE_REQUEST_TIMEOUT: Duration =
+    Duration::from_millis(chromiumoxide::handler::REQUEST_TIMEOUT);
 
 /// Run `call`, failing with a transport error if it has not finished within
 /// `limit`.
@@ -85,8 +93,21 @@ where
 /// fixed 30 s timer that ignores the configured [`CDP_REQUEST_TIMEOUT`], so
 /// awaiting a slower promise would fail with a generic timeout.
 async fn evaluate_awaiting(page: &Page, params: EvaluateParams) -> Result<Value, JsCallError> {
-    let result = page.evaluate_expression(params).await?;
+    let result = page
+        .evaluate_expression(params)
+        .await
+        .map_err(|e| JsCallError::from_cdp(e, CDP_REQUEST_TIMEOUT))?;
     Ok(result.value().cloned().unwrap_or(Value::Null))
+}
+
+/// A unique `objectGroup` name, so one call's remote objects can be
+/// released together.
+fn next_object_group() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "native-devtools-call-{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// An element handle passed to a page function.
@@ -104,39 +125,49 @@ enum JsArg<'a> {
 }
 
 /// Call `function_declaration` in the realm of `this_element`'s frame, with
-/// `this` bound to that element, and return the by-value result.
+/// `this` bound to that element, and return the by-value result. The call
+/// is bounded by `limit`.
 ///
 /// Elements are resolved with `DOM.resolveNode` without a context, which
 /// wraps each node in the main world of its own frame, so `document`,
 /// `location` and `instanceof` checks see the element's own frame.
 ///
-/// For an element in the top frame whose main-world context chromiumoxide
-/// tracks, the call goes through `Page::evaluate_function`, which honors
+/// When chromiumoxide knows the main-world context of that frame, the call
+/// goes through `Page::evaluate_function`, which honors
 /// [`CDP_REQUEST_TIMEOUT`]. That API always sends `executionContextId`, which
 /// Chrome rejects together with `objectId`, so the element is passed as an
-/// argument and rebound to `this` in the page. chromiumoxide does not track
-/// the contexts of child frames, and may not have the top-frame context yet
-/// right after a navigation. In those cases the call uses `callFunctionOn`
-/// with the element's `objectId` through `Page::execute`, which stays
-/// limited to chromiumoxide's fixed 30 s.
+/// argument and rebound to `this` in the page.
+///
+/// chromiumoxide tracks child-frame contexts (from `Page.frameAttached` and
+/// the `frameId` in each context's `auxData`), but the tracking races with
+/// page load: for an iframe that is part of the loaded document it usually
+/// does not know the frame at all, and for an iframe added later it may not
+/// have the context yet. Right after a navigation it may also lack the top
+/// frame's context. When the context is unknown, the call uses
+/// `callFunctionOn` with the element's `objectId` through `Page::execute`,
+/// which stays limited to chromiumoxide's fixed 30 s.
+///
+/// All remote objects are created in one object group, released after the
+/// call even when `limit` cut it off.
 async fn call_function_on_element(
     page: &Page,
     function_declaration: &str,
     this_element: &ElementRef<'_>,
     args: Vec<JsArg<'_>>,
+    limit: Duration,
 ) -> Result<Value, JsCallError> {
-    let mut object_ids: Vec<RemoteObjectId> = Vec::new();
-    let result = call_function_on_element_inner(
+    let object_group = next_object_group();
+    let call = call_function_on_element_inner(
         page,
         function_declaration,
         this_element,
         args,
-        &mut object_ids,
-    )
-    .await;
-    for object_id in object_ids {
-        let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
-    }
+        &object_group,
+    );
+    let result = bounded(limit, call).await;
+    let _ = page
+        .execute(ReleaseObjectGroupParams::new(object_group))
+        .await;
     result
 }
 
@@ -145,17 +176,15 @@ async fn call_function_on_element_inner(
     function_declaration: &str,
     this_element: &ElementRef<'_>,
     args: Vec<JsArg<'_>>,
-    object_ids: &mut Vec<RemoteObjectId>,
+    object_group: &str,
 ) -> Result<Value, JsCallError> {
-    let this_object = resolve_element(page, this_element).await?;
-    object_ids.push(this_object.clone());
+    let this_object = resolve_element(page, this_element, object_group).await?;
 
     let mut call_arguments = Vec::with_capacity(args.len());
     for arg in args {
         match arg {
             JsArg::Element(element) => {
-                let object_id = resolve_element(page, &element).await?;
-                object_ids.push(object_id.clone());
+                let object_id = resolve_element(page, &element, object_group).await?;
                 call_arguments.push(CallArgument::builder().object_id(object_id).build());
             }
             JsArg::Value(value) => {
@@ -164,7 +193,7 @@ async fn call_function_on_element_inner(
         }
     }
 
-    match top_frame_context_for(page, &this_object).await {
+    match element_frame_context(page, &this_object, object_group).await {
         Some(context_id) => {
             let mut arguments = Vec::with_capacity(call_arguments.len() + 1);
             arguments.push(CallArgument::builder().object_id(this_object).build());
@@ -177,7 +206,10 @@ async fn call_function_on_element_inner(
                 .await_promise(true)
                 .build()
                 .map_err(JsCallError::Setup)?;
-            let result = page.evaluate_function(params).await?;
+            let result = page
+                .evaluate_function(params)
+                .await
+                .map_err(|e| JsCallError::from_cdp(e, CDP_REQUEST_TIMEOUT))?;
             Ok(result.value().cloned().unwrap_or(Value::Null))
         }
         None => {
@@ -189,7 +221,10 @@ async fn call_function_on_element_inner(
                 .await_promise(true)
                 .build()
                 .map_err(JsCallError::Setup)?;
-            let resp = page.execute(params).await?;
+            let resp = page
+                .execute(params)
+                .await
+                .map_err(|e| JsCallError::from_cdp(e, EXECUTE_REQUEST_TIMEOUT))?;
             if let Some(exc) = &resp.result.exception_details {
                 return Err(JsCallError::Exception(exc.text.clone()));
             }
@@ -202,6 +237,7 @@ async fn call_function_on_element_inner(
 async fn resolve_element(
     page: &Page,
     element: &ElementRef<'_>,
+    object_group: &str,
 ) -> Result<RemoteObjectId, JsCallError> {
     let not_resolved = || {
         JsCallError::Setup(format!(
@@ -211,34 +247,48 @@ async fn resolve_element(
     };
     let params = ResolveNodeParams::builder()
         .backend_node_id(BackendNodeId::new(element.backend_node_id))
+        .object_group(object_group)
         .build();
     let resp = page.execute(params).await.map_err(|_| not_resolved())?;
     resp.result.object.object_id.ok_or_else(not_resolved)
 }
 
-/// The tracked main-world context of the top frame, if `object` lives in
-/// the top frame and chromiumoxide knows that context. `None` otherwise.
-async fn top_frame_context_for(page: &Page, object: &RemoteObjectId) -> Option<ExecutionContextId> {
+/// The main-world context of the frame that owns the element `object`, if
+/// chromiumoxide tracks it. `None` otherwise.
+async fn element_frame_context(
+    page: &Page,
+    object: &RemoteObjectId,
+    object_group: &str,
+) -> Option<ExecutionContextId> {
+    // `null` in the top frame, the owning <iframe> element in a child frame,
+    // `undefined` for a node without a window (detached document).
     let params = CallFunctionOnParams::builder()
-        .function_declaration("function() { return window === window.top; }")
+        .function_declaration(
+            "function() { const view = this.ownerDocument && this.ownerDocument.defaultView; return view ? view.frameElement : undefined; }",
+        )
         .object_id(object.clone())
-        .return_by_value(true)
+        .object_group(object_group)
         .build()
         .ok()?;
-    let in_top_frame = page
-        .execute(params)
-        .await
-        .ok()?
-        .result
-        .result
-        .value
-        .as_ref()
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !in_top_frame {
-        return None;
+    let frame_element = page.execute(params).await.ok()?.result.result;
+    match frame_element.object_id {
+        Some(owner_id) => {
+            let owner = page
+                .execute(DescribeNodeParams::builder().object_id(owner_id).build())
+                .await
+                .ok()?
+                .result
+                .node;
+            page.frame_execution_context(owner.frame_id?)
+                .await
+                .ok()
+                .flatten()
+        }
+        None if frame_element.subtype == Some(RemoteObjectSubtype::Null) => {
+            page.execution_context().await.ok().flatten()
+        }
+        None => None,
     }
-    page.execution_context().await.ok().flatten()
 }
 
 /// Wrap a function declaration so its first argument becomes `this` and is
@@ -256,23 +306,26 @@ pub async fn cdp_evaluate_script(
     args: Option<Vec<serde_json::Value>>,
     cdp_client: Arc<RwLock<Option<CdpClient>>>,
 ) -> CallToolResult {
-    let guard = cdp_client.read().await;
-    let client = match guard.as_ref() {
-        Some(c) => c,
-        None => return cdp_error("No CDP connection. Use cdp_connect first."),
+    // Read what we need under the lock, then release it before the call,
+    // which can run for up to a minute and would block writers (navigate,
+    // select_page, disconnect) and, through lock fairness, later readers.
+    let (page, uid_backend_pairs) = {
+        let guard = cdp_client.read().await;
+        let client = match guard.as_ref() {
+            Some(c) => c,
+            None => return cdp_error("No CDP connection. Use cdp_connect first."),
+        };
+        let page = match client.require_page() {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        match element_uid_args(client, &page, args.as_deref()).await {
+            Ok(pairs) => (page, pairs),
+            Err(e) => return e,
+        }
     };
 
-    let page = match client.require_page() {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-
-    // Determine if we need to resolve element args.
-    let has_uid_args = args
-        .as_ref()
-        .is_some_and(|a| a.iter().any(|v| v.get("uid").is_some()));
-
-    if !has_uid_args {
+    if uid_backend_pairs.is_empty() {
         // Simple case: evaluate the expression directly.
         // If the whole source is a function expression, call it as an IIFE so
         // `() => document.title` returns the title, not the function object.
@@ -294,30 +347,6 @@ pub async fn cdp_evaluate_script(
         };
     }
 
-    // Args case: resolve UIDs to remote objects and call function with them.
-    let arg_list = match args.as_ref() {
-        Some(a) => a,
-        None => return cdp_error("args required when passing element references"),
-    };
-
-    // Collect (uid, backend_node_id) pairs first to avoid borrow issues.
-    let mut uid_backend_pairs: Vec<(String, i64)> = Vec::with_capacity(arg_list.len());
-    let current_url = page_url(&page).await;
-    for arg in arg_list {
-        if let Some(uid) = arg.get("uid").and_then(|v| v.as_str()) {
-            let node = match crate::cdp::resolve_uid_from_maps(
-                uid,
-                client.last_dom_snapshot.as_ref(),
-                client.generation,
-                &current_url,
-            ) {
-                Ok(n) => n,
-                Err(msg) => return cdp_error(msg),
-            };
-            uid_backend_pairs.push((uid.to_string(), node.backend_node_id));
-        }
-    }
-
     fn element_ref((uid, backend_node_id): &(String, i64)) -> ElementRef<'_> {
         ElementRef {
             kind: "Element",
@@ -335,11 +364,51 @@ pub async fn cdp_evaluate_script(
         .map(|pair| JsArg::Element(element_ref(pair)))
         .collect();
 
-    let call = call_function_on_element(&page, &function, &this_element, element_args);
-    match bounded(EVALUATE_SCRIPT_TIMEOUT, call).await {
+    match call_function_on_element(
+        &page,
+        &function,
+        &this_element,
+        element_args,
+        EVALUATE_SCRIPT_TIMEOUT,
+    )
+    .await
+    {
         Ok(value) => pretty_json_result(&value),
         Err(e) => e.into_tool_error("JavaScript exception", "Failed to call function"),
     }
+}
+
+/// `(uid, backendNodeId)` for each `{ "uid": ... }` entry in `args`,
+/// resolved against the current DOM snapshot. Empty when no entry has a uid.
+async fn element_uid_args(
+    client: &CdpClient,
+    page: &Page,
+    args: Option<&[Value]>,
+) -> Result<Vec<(String, i64)>, CallToolResult> {
+    let args = args.unwrap_or_default();
+    if !args.iter().any(|arg| arg.get("uid").is_some()) {
+        return Ok(Vec::new());
+    }
+    let uids: Vec<&str> = args
+        .iter()
+        .filter_map(|arg| arg.get("uid").and_then(Value::as_str))
+        .collect();
+    if uids.is_empty() {
+        return Err(cdp_error("No element arguments could be resolved."));
+    }
+    let current_url = page_url(page).await;
+    uids.into_iter()
+        .map(|uid| {
+            crate::cdp::resolve_uid_from_maps(
+                uid,
+                client.last_dom_snapshot.as_ref(),
+                client.generation,
+                &current_url,
+            )
+            .map(|node| (uid.to_string(), node.backend_node_id))
+            .map_err(cdp_error)
+        })
+        .collect()
 }
 
 fn pretty_json_result(value: &Value) -> CallToolResult {
@@ -719,15 +788,20 @@ async fn wait_for_scoped_semantic_change(
         JsArg::Value(stable_ms.into()),
         JsArg::Value(poll_interval_ms.into()),
     ];
-    let call = call_function_on_element(page, PAGE_CHANGE_WAIT_JS, scope, args);
-    bounded(page_change_call_limit(timeout_ms), call)
-        .await
-        .map_err(|e| {
-            e.into_tool_error(
-                PAGE_CHANGE_WAIT_EXCEPTION_PREFIX,
-                PAGE_CHANGE_WAIT_TRANSPORT_PREFIX,
-            )
-        })
+    call_function_on_element(
+        page,
+        PAGE_CHANGE_WAIT_JS,
+        scope,
+        args,
+        page_change_call_limit(timeout_ms),
+    )
+    .await
+    .map_err(|e| {
+        e.into_tool_error(
+            PAGE_CHANGE_WAIT_EXCEPTION_PREFIX,
+            PAGE_CHANGE_WAIT_TRANSPORT_PREFIX,
+        )
+    })
 }
 
 fn decorate_semantic_wait_result(
@@ -1434,7 +1508,10 @@ mod tests {
     #[test]
     fn javascript_exception_maps_to_exception_with_its_text() {
         let details = ExceptionDetails::new(1, "Uncaught TypeError: boom", 0, 0);
-        let err = JsCallError::from(CdpError::JavascriptException(Box::new(details)));
+        let err = JsCallError::from_cdp(
+            CdpError::JavascriptException(Box::new(details)),
+            CDP_REQUEST_TIMEOUT,
+        );
         assert_eq!(
             err,
             JsCallError::Exception("Uncaught TypeError: boom".to_string())
@@ -1442,11 +1519,20 @@ mod tests {
     }
 
     #[test]
-    fn request_timeout_maps_to_transport_error_naming_the_limit() {
-        let err = JsCallError::from(CdpError::Timeout);
+    fn request_timeout_on_evaluate_path_names_configured_limit() {
+        let err = JsCallError::from_cdp(CdpError::Timeout, CDP_REQUEST_TIMEOUT);
         assert_eq!(
             err,
             JsCallError::Transport("no response within the 65 s CDP request timeout".to_string())
+        );
+    }
+
+    #[test]
+    fn request_timeout_on_execute_path_names_fixed_30_second_limit() {
+        let err = JsCallError::from_cdp(CdpError::Timeout, EXECUTE_REQUEST_TIMEOUT);
+        assert_eq!(
+            err,
+            JsCallError::Transport("no response within the 30 s CDP request timeout".to_string())
         );
     }
 }

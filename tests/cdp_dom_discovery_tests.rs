@@ -937,3 +937,65 @@ async fn cdp_evaluate_script_times_out_promise_that_never_settles() {
         elapsed
     );
 }
+
+/// An iframe added after the page loaded. chromiumoxide may or may not have
+/// its context tracked by the time of the call, so this covers whichever
+/// path is taken: the element must still run in the iframe's realm.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Chrome — run with `cargo test -- --ignored`"]
+async fn cdp_evaluate_script_runs_late_iframe_element_arg_in_iframe_realm() {
+    let Some(mut h) = Harness::launch_or_skip().await else {
+        return;
+    };
+    h.navigate(HTML_QUIET_MESSAGE_LOG).await;
+    let added = cdp_evaluate_script(
+        r#"() => new Promise(resolve => {
+            const frame = document.createElement('iframe');
+            frame.srcdoc = '<button aria-label="LateBtn">LateBtn</button>';
+            frame.onload = () => resolve(true);
+            document.body.appendChild(frame);
+        })"#
+        .to_string(),
+        None,
+        h.client_handle(),
+    )
+    .await;
+    assert_eq!(
+        added.is_error,
+        Some(false),
+        "add iframe failed: {:?}",
+        added
+    );
+
+    let found = cdp_find_elements(
+        "LateBtn".into(),
+        Some("button".into()),
+        Some(10),
+        h.client_handle(),
+    )
+    .await;
+    let found_json: serde_json::Value =
+        serde_json::from_str(&content_text(&found)).expect("find_elements returns JSON");
+    let uid = found_json["matches"][0]["uid"]
+        .as_str()
+        .expect("LateBtn uid")
+        .to_string();
+
+    let result = cdp_evaluate_script(
+        "(el) => new Promise(resolve => setTimeout(() => resolve([el.textContent, location.href, el instanceof HTMLElement]), 10))"
+            .to_string(),
+        Some(vec![serde_json::json!({ "uid": uid })]),
+        h.client_handle(),
+    )
+    .await;
+
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "evaluate failed: {:?}",
+        result
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&content_text(&result)).expect("evaluate returns JSON");
+    assert_eq!(value, serde_json::json!(["LateBtn", "about:srcdoc", true]));
+}
