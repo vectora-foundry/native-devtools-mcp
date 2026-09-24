@@ -36,18 +36,18 @@ The server does NOT:
 native-devtools-mcp verify
 ```
 
-This computes the SHA-256 hash of the running binary and compares it against the official checksums published on the [GitHub Releases](https://github.com/sh3ll3x3c/native-devtools-mcp/releases) page.
+This computes the SHA-256 hash of the running binary and compares it against the official checksums published on the [GitHub Releases](https://github.com/vectora-foundry/native-devtools-mcp/releases) page.
 
 ### Option 2: Build from source
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sh3ll3x3c/native-devtools-mcp/master/scripts/build-from-source.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vectora-foundry/native-devtools-mcp/master/scripts/build-from-source.sh | bash
 ```
 
 Or clone and build manually:
 
 ```bash
-git clone https://github.com/sh3ll3x3c/native-devtools-mcp.git
+git clone https://github.com/vectora-foundry/native-devtools-mcp.git
 cd native-devtools-mcp
 cargo build --release
 ./target/release/native-devtools-mcp setup
@@ -57,7 +57,7 @@ cargo build --release
 
 You can use any LLM to audit this codebase. Here's a prompt you can use:
 
-> I want you to perform a thorough security audit of the native-devtools-mcp codebase (https://github.com/sh3ll3x3c/native-devtools-mcp). This is an MCP server that requires macOS Accessibility and Screen Recording permissions.
+> I want you to perform a thorough security audit of the native-devtools-mcp codebase (https://github.com/vectora-foundry/native-devtools-mcp). This is an MCP server that requires macOS Accessibility and Screen Recording permissions.
 >
 > Please analyze:
 > 1. All system permission usage — are Accessibility and Screen Recording used only for their stated purposes?

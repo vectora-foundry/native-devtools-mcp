@@ -4,7 +4,7 @@ version = "0.10.1"
 edition = "2021"
 license = "MIT"
 description = "MCP server for computer use & browser automation — screenshot, OCR, click, type, find_text, Chrome/Electron CDP, template matching. macOS, Windows & Android."
-repository = "https://github.com/sh3ll3x3c/native-devtools-mcp"
+repository = "https://github.com/vectora-foundry/native-devtools-mcp"
 keywords = ["mcp", "computer-use", "ui-automation", "android", "screenshot"]
 categories = ["development-tools::testing", "accessibility"]
 # README demo GIFs (~11 MiB) are repo-only assets; excluding them keeps the
