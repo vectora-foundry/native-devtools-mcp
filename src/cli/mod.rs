@@ -1,3 +1,4 @@
+pub mod install_source;
 pub mod setup;
 pub mod verify;
 
