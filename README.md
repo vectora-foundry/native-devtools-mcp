@@ -232,7 +232,7 @@ cdp_press_key(key="Enter")
 cdp_wait_for(text=["Results"])
 ```
 
-**18 CDP tools** — DOM snapshot, find elements, click, hover, fill, type, press key, navigate, handle dialogs, manage tabs, evaluate JS, element inspection, and more. Works with Chrome 136+, Chromium, and Electron apps (Signal, Discord, VS Code, Slack). See [`AGENTS.md`](./AGENTS.md) for the full tool reference.
+**21 CDP tools** — page summary, DOM snapshot, find elements, element context, click, hover, fill, type, press key, navigate, handle dialogs, manage tabs, wait for text or page changes, evaluate JS, element inspection, and more. All CDP tools are always listed; they return a "No CDP connection" error until `cdp_connect` succeeds. Works with Chrome 136+, Chromium, and Electron apps (Signal, Discord, VS Code, Slack). See [`AGENTS.md`](./AGENTS.md) for the full tool reference.
 
 > **Chrome 136+ note:** requires `--user-data-dir=<path>` alongside `--remote-debugging-port` — Chrome silently ignores the debug port with the default profile. Electron apps only need `--remote-debugging-port`.
 
@@ -248,12 +248,12 @@ Android support is built-in. The server communicates with Android devices over A
 
 ### Tools
 
-All Android tools are prefixed with `android_` and appear dynamically after connecting to a device:
+All Android tools are prefixed with `android_`. `android_list_devices` and `android_connect` are always available; the others appear dynamically after connecting to a device:
 
 | Tool | Description |
 |------|-------------|
 | `android_list_devices` | List all ADB-connected devices (always available) |
-| `android_connect` | Connect to a device by serial number |
+| `android_connect` | Connect to a device by serial number (always available) |
 | `android_disconnect` | Disconnect from the current device |
 | `android_screenshot` | Capture the device screen |
 | `android_find_text` | Find UI elements by text (via uiautomator) |

@@ -145,6 +145,10 @@ pub struct FocusWindowResult {
     pub bundle_id: Option<String>,
     /// Classification used by CDP auto-connect policy.
     pub kind: AppKind,
+    /// Set when the app was focused but the exact request could not be met
+    /// (e.g. the requested window could not be raised on its own).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 fn focused(result: FocusWindowResult) -> CallToolResult {
@@ -174,6 +178,7 @@ fn build_result_for_pid(pid: i32, fallback_name: Option<&str>) -> FocusWindowRes
             pid: app.pid,
             bundle_id: app.bundle_id,
             kind,
+            warning: None,
         }
     } else {
         let name = fallback_name.unwrap_or("").to_string();
@@ -187,6 +192,7 @@ fn build_result_for_pid(pid: i32, fallback_name: Option<&str>) -> FocusWindowRes
             pid,
             bundle_id: None,
             kind,
+            warning: None,
         }
     }
 }
@@ -222,6 +228,7 @@ fn focus_by_app_name(app_name: &str) -> CallToolResult {
             pid: 0,
             bundle_id: None,
             kind: AppKind::Native,
+            warning: None,
         });
     }
 
@@ -262,11 +269,26 @@ fn focus_by_window_id(window_id: u32) -> CallToolResult {
             let pid = window.owner_pid as i32;
             let owner_name = window.owner_name.clone();
             if platform::activate_app_by_pid(pid) {
-                platform::raise_windows(pid);
+                // Raise only the requested window. Raising every window of
+                // the app would leave whichever window came last on top.
+                let warning = if platform::raise_window(&window) {
+                    None
+                } else {
+                    // Keep the app in front the same way `pid` focus does,
+                    // and tell the caller the exact window was not raised.
+                    platform::raise_windows(pid);
+                    Some(format!(
+                        "Activated '{}' (PID {}) but could not raise window {} on its own; \
+                         another window of the app may be in front.",
+                        owner_name, pid, window_id
+                    ))
+                };
                 // `owner_name` gives us a reliable fallback if `list_apps`
                 // doesn't surface this pid (e.g. helper window owned by
                 // a process that list_apps doesn't consider user-facing).
-                focused(build_result_for_pid(pid, Some(&owner_name)))
+                let mut result = build_result_for_pid(pid, Some(&owner_name));
+                result.warning = warning;
+                focused(result)
             } else {
                 error(format!(
                     "Found window {} but failed to activate its owning app (PID {}).",
@@ -293,6 +315,7 @@ mod focus_window_tests {
             pid: 16024,
             bundle_id: Some("org.whispersystems.signal-desktop".to_string()),
             kind: AppKind::ElectronApp,
+            warning: None,
         };
         let json: serde_json::Value = serde_json::to_value(&result).unwrap();
         assert_eq!(json["app_name"], "Signal");
@@ -308,9 +331,23 @@ mod focus_window_tests {
             pid: 42,
             bundle_id: None,
             kind: AppKind::Native,
+            warning: None,
         };
         let json: serde_json::Value = serde_json::to_value(&result).unwrap();
         assert!(!json.as_object().unwrap().contains_key("bundle_id"));
         assert_eq!(json["kind"], "Native");
+    }
+
+    #[test]
+    fn result_omits_warning_when_window_was_raised() {
+        let result = FocusWindowResult {
+            app_name: "Notes".to_string(),
+            pid: 7,
+            bundle_id: None,
+            kind: AppKind::Native,
+            warning: None,
+        };
+        let json: serde_json::Value = serde_json::to_value(&result).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("warning"));
     }
 }
