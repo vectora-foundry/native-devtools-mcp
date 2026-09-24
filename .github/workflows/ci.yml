@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+# The crate only builds on macOS and Windows (no Linux platform backend),
+# so every job runs on one of those two runners.
+jobs:
+  fmt:
+    name: Format
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  check:
+    name: Clippy + Test - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # Pre-existing warnings are not yet fixed, so warnings do not fail
+      # the job. Compile errors in any target (tests, benches, examples) do.
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+      - name: Test
+        run: cargo test
+
+  package:
+    name: Package (cargo publish --dry-run)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify crate packaging
+        run: cargo publish --dry-run
