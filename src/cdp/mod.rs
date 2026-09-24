@@ -7,6 +7,7 @@ pub mod dom_discovery;
 pub mod tools;
 
 use chromiumoxide::browser::Browser;
+use chromiumoxide::handler::HandlerConfig;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
 use rmcp::model::{CallToolResult, Content};
@@ -14,6 +15,22 @@ use std::collections::HashMap;
 use tokio::task::JoinHandle;
 
 pub const DOM_UID_PREFIX: &str = "d";
+
+/// How long the chromiumoxide handler keeps a CDP request pending before it
+/// fails it with `CdpError::Timeout`.
+///
+/// chromiumoxide defaults to 30 s. That is shorter than the longest wait a
+/// tool may ask the page to run (`cdp_wait_for_page_change` accepts up to
+/// 55 s), so the transport would cut such calls off before the tool's own
+/// timeout fires. 65 s keeps a 10 s margin above the longest tool wait for
+/// the JS timer to fire and the result to travel back.
+///
+/// Only calls sent through `Page::evaluate_expression` /
+/// `Page::evaluate_function` use this limit. `Page::execute` arms its own
+/// fixed 30 s timer that ignores `HandlerConfig::request_timeout`, so any
+/// call that can await a long page promise must use the evaluate APIs (see
+/// `tools::script`).
+pub const CDP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
 
 /// CDP client state, owned by the MCP server.
 pub struct CdpClient {
@@ -38,7 +55,11 @@ impl CdpClient {
     /// chromiumoxide handler loop, and auto-selects the first non-extension page.
     pub async fn connect(port: u16) -> Result<Self, String> {
         let url = format!("http://127.0.0.1:{}", port);
-        let (mut browser, mut handler) = Browser::connect(&url)
+        let handler_config = HandlerConfig {
+            request_timeout: CDP_REQUEST_TIMEOUT,
+            ..HandlerConfig::default()
+        };
+        let (mut browser, mut handler) = Browser::connect_with_config(&url, handler_config)
             .await
             .map_err(|e| format!("Cannot connect to port {}. Is the app running with --remote-debugging-port? Error: {}", port, e))?;
 

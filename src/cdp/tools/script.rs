@@ -1,35 +1,107 @@
 //! CDP script and snapshot tools: evaluate_script, find_elements,
 //! take_dom_snapshot, wait_for.
 
-use crate::cdp::{cdp_error, page_url, CdpClient};
+use crate::cdp::{cdp_error, page_url, CdpClient, CDP_REQUEST_TIMEOUT};
 use chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, DescribeNodeParams, ResolveNodeParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{
-    CallArgument, CallFunctionOnParams, EvaluateParams, ReleaseObjectParams,
+    CallArgument, CallFunctionOnParams, EvaluateParams, ExecutionContextId, ReleaseObjectParams,
+    RemoteObjectId,
 };
+use chromiumoxide::error::CdpError;
 use chromiumoxide::page::Page;
 use rmcp::model::{CallToolResult, Content};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Format a JS execution response into a tool result, handling exceptions.
-fn format_js_result(
-    result: &chromiumoxide::cdp::js_protocol::runtime::EvaluateReturns,
-) -> CallToolResult {
-    if let Some(exc) = &result.exception_details {
-        return cdp_error(format!("JavaScript exception: {}", exc.text));
+/// Why a JS call that may await a page promise failed.
+#[derive(Debug, PartialEq)]
+enum JsCallError {
+    /// The script threw, or the promise it returned rejected.
+    Exception(String),
+    /// No JS result came back (transport error, request timeout, ...).
+    Transport(String),
+}
+
+impl JsCallError {
+    fn into_tool_error(self, exception_prefix: &str, transport_prefix: &str) -> CallToolResult {
+        match self {
+            Self::Exception(text) => cdp_error(format!("{}: {}", exception_prefix, text)),
+            Self::Transport(text) => cdp_error(format!("{}: {}", transport_prefix, text)),
+        }
     }
-    let value = result
-        .result
-        .value
-        .as_ref()
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    CallToolResult::success(vec![Content::text(
-        serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string()),
-    )])
+}
+
+impl From<CdpError> for JsCallError {
+    fn from(err: CdpError) -> Self {
+        match err {
+            CdpError::JavascriptException(details) => Self::Exception(details.text),
+            CdpError::Timeout => Self::Transport(format!(
+                "no response within the {} s CDP request timeout",
+                CDP_REQUEST_TIMEOUT.as_secs()
+            )),
+            other => Self::Transport(other.to_string()),
+        }
+    }
+}
+
+/// Run `Runtime.evaluate` and return the by-value result.
+///
+/// Uses `Page::evaluate_expression`, not `Page::execute`: `execute` arms a
+/// fixed 30 s timer that ignores the configured [`CDP_REQUEST_TIMEOUT`], so
+/// awaiting a slower promise would fail with a generic timeout.
+async fn evaluate_awaiting(page: &Page, params: EvaluateParams) -> Result<Value, JsCallError> {
+    let result = page.evaluate_expression(params).await?;
+    Ok(result.value().cloned().unwrap_or(Value::Null))
+}
+
+/// Run `Runtime.callFunctionOn` and return the by-value result.
+///
+/// Same reason as [`evaluate_awaiting`] for using `Page::evaluate_function`.
+/// That API always sends an `executionContextId`, and Chrome rejects
+/// `executionContextId` together with `objectId`. So `params` must not set
+/// `object_id`; pass element handles as arguments resolved in the same
+/// context (see [`main_world_context`]).
+async fn call_function_awaiting(
+    page: &Page,
+    params: CallFunctionOnParams,
+) -> Result<Value, JsCallError> {
+    let result = page.evaluate_function(params).await?;
+    Ok(result.value().cloned().unwrap_or(Value::Null))
+}
+
+/// Main-world execution context of the page's main frame.
+///
+/// Element handles passed to [`call_function_awaiting`] must be resolved in
+/// this context, or Chrome rejects them as belonging to another world.
+async fn main_world_context(page: &Page) -> Result<ExecutionContextId, String> {
+    match page.execution_context().await {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => Err("the page has no JavaScript execution context yet".to_string()),
+        Err(e) => Err(format!("cannot get the page execution context: {}", e)),
+    }
+}
+
+/// Wrap a function declaration so it runs with `this` bound to its first
+/// argument and still receives every argument, matching `callFunctionOn`
+/// with that argument's `objectId` and the full argument list.
+fn bind_this_to_first_argument(function_declaration: &str) -> String {
+    format!(
+        "function(...args) {{ return ({}\n).apply(args[0], args); }}",
+        function_declaration
+    )
+}
+
+/// Wrap a function declaration so its first argument becomes `this` and is
+/// dropped from the arguments, matching `callFunctionOn` with that
+/// argument's `objectId` and the remaining arguments.
+fn use_first_argument_as_this(function_declaration: &str) -> String {
+    format!(
+        "function(thisArg, ...args) {{ return ({}\n).apply(thisArg, args); }}",
+        function_declaration
+    )
 }
 
 pub async fn cdp_evaluate_script(
@@ -73,9 +145,9 @@ pub async fn cdp_evaluate_script(
         eval_params.return_by_value = Some(true);
         eval_params.await_promise = Some(true);
 
-        return match page.execute(eval_params).await {
-            Ok(resp) => format_js_result(&resp.result),
-            Err(e) => cdp_error(format!("Failed to evaluate script: {}", e)),
+        return match evaluate_awaiting(&page, eval_params).await {
+            Ok(value) => pretty_json_result(&value),
+            Err(e) => e.into_tool_error("JavaScript exception", "Failed to evaluate script"),
         };
     }
 
@@ -104,12 +176,20 @@ pub async fn cdp_evaluate_script(
         }
     }
 
-    // Resolve each backend node ID to a remote object ID.
-    // Track the first element's objectId to use as the execution context for callFunctionOn.
-    let mut first_object_id = None;
+    if uid_backend_pairs.is_empty() {
+        return cdp_error("No element arguments could be resolved.");
+    }
+
+    // Resolve every element in the page's main-world context and call the
+    // function in that same context (see `call_function_awaiting`).
+    let context_id = match main_world_context(&page).await {
+        Ok(id) => id,
+        Err(msg) => return cdp_error(format!("Failed to call function: {}", msg)),
+    };
     for (uid, backend_node_id) in &uid_backend_pairs {
         let resolve_params = ResolveNodeParams::builder()
             .backend_node_id(BackendNodeId::new(*backend_node_id))
+            .execution_context_id(context_id)
             .build();
 
         let remote_object = match page.execute(resolve_params).await {
@@ -132,23 +212,14 @@ pub async fn cdp_evaluate_script(
             }
         };
 
-        if first_object_id.is_none() {
-            first_object_id = Some(object_id.clone());
-        }
         call_arguments.push(CallArgument::builder().object_id(object_id).build());
     }
 
-    // CDP callFunctionOn requires objectId or executionContextId.
-    // Use the first element's objectId so the function executes in that element's context.
-    let target_object_id = match first_object_id {
-        Some(id) => id,
-        None => return cdp_error("No element arguments could be resolved."),
-    };
-
-    // Call the function with the resolved element arguments.
+    // `this` stays bound to the first element, as with callFunctionOn on
+    // that element's objectId.
     let call_params = match CallFunctionOnParams::builder()
-        .function_declaration(function)
-        .object_id(target_object_id)
+        .function_declaration(bind_this_to_first_argument(&function))
+        .execution_context_id(context_id)
         .arguments(call_arguments)
         .return_by_value(true)
         .await_promise(true)
@@ -158,25 +229,16 @@ pub async fn cdp_evaluate_script(
         Err(e) => return cdp_error(format!("Failed to build call params: {}", e)),
     };
 
-    match page.execute(call_params).await {
-        Ok(resp) => {
-            // CallFunctionOn returns CallFunctionOnReturns, not EvaluateReturns.
-            if let Some(exc) = &resp.result.exception_details {
-                return cdp_error(format!("JavaScript exception: {}", exc.text));
-            }
-            let value = resp
-                .result
-                .result
-                .value
-                .as_ref()
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            CallToolResult::success(vec![Content::text(
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| "null".to_string()),
-            )])
-        }
-        Err(e) => cdp_error(format!("Failed to call function: {}", e)),
+    match call_function_awaiting(&page, call_params).await {
+        Ok(value) => pretty_json_result(&value),
+        Err(e) => e.into_tool_error("JavaScript exception", "Failed to call function"),
     }
+}
+
+fn pretty_json_result(value: &Value) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string()),
+    )])
 }
 
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
@@ -297,7 +359,7 @@ async function(timeoutMs, stableMs, pollIntervalMs) {
     return tag;
   };
   const isVisible = (el) => {
-    if (!(el instanceof Element)) return false;
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
     if (el === document.body || el === safeRoot) return true;
     const style = window.getComputedStyle(el);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -511,10 +573,12 @@ async fn resolve_scope_backend_node_id(
 async fn resolve_scope_object_id(
     scope_uid: &str,
     backend_node_id: i64,
+    context_id: ExecutionContextId,
     page: &Page,
-) -> Result<chromiumoxide::cdp::js_protocol::runtime::RemoteObjectId, CallToolResult> {
+) -> Result<RemoteObjectId, CallToolResult> {
     let resolve_params = ResolveNodeParams::builder()
         .backend_node_id(BackendNodeId::new(backend_node_id))
+        .execution_context_id(context_id)
         .build();
     let remote_object = page.execute(resolve_params).await.map_err(|e| {
         cdp_error(format!(
@@ -530,29 +594,9 @@ async fn resolve_scope_object_id(
     })
 }
 
-fn semantic_wait_value_from_evaluate(
-    result: chromiumoxide::cdp::js_protocol::runtime::EvaluateReturns,
-) -> Result<Value, CallToolResult> {
-    if let Some(exc) = &result.exception_details {
-        return Err(cdp_error(format!(
-            "JavaScript exception while waiting for page change: {}",
-            exc.text
-        )));
-    }
-    Ok(result.result.value.as_ref().cloned().unwrap_or(Value::Null))
-}
-
-fn semantic_wait_value_from_call(
-    result: chromiumoxide::cdp::js_protocol::runtime::CallFunctionOnReturns,
-) -> Result<Value, CallToolResult> {
-    if let Some(exc) = &result.exception_details {
-        return Err(cdp_error(format!(
-            "JavaScript exception while waiting for page change: {}",
-            exc.text
-        )));
-    }
-    Ok(result.result.value.as_ref().cloned().unwrap_or(Value::Null))
-}
+const PAGE_CHANGE_WAIT_EXCEPTION_PREFIX: &str =
+    "JavaScript exception while waiting for page change";
+const PAGE_CHANGE_WAIT_TRANSPORT_PREFIX: &str = "Failed to wait for page change";
 
 async fn wait_for_page_semantic_change(
     page: &Page,
@@ -567,24 +611,27 @@ async fn wait_for_page_semantic_change(
     let mut eval_params = EvaluateParams::new(expression);
     eval_params.return_by_value = Some(true);
     eval_params.await_promise = Some(true);
-    let resp = page
-        .execute(eval_params)
-        .await
-        .map_err(|e| cdp_error(format!("Failed to wait for page change: {}", e)))?;
-    semantic_wait_value_from_evaluate(resp.result)
+    evaluate_awaiting(page, eval_params).await.map_err(|e| {
+        e.into_tool_error(
+            PAGE_CHANGE_WAIT_EXCEPTION_PREFIX,
+            PAGE_CHANGE_WAIT_TRANSPORT_PREFIX,
+        )
+    })
 }
 
 async fn wait_for_scoped_semantic_change(
     page: &Page,
-    object_id: chromiumoxide::cdp::js_protocol::runtime::RemoteObjectId,
+    context_id: ExecutionContextId,
+    object_id: RemoteObjectId,
     timeout_ms: u64,
     stable_ms: u64,
     poll_interval_ms: u64,
 ) -> Result<Value, CallToolResult> {
     let call_params = CallFunctionOnParams::builder()
-        .function_declaration(PAGE_CHANGE_WAIT_JS)
-        .object_id(object_id.clone())
+        .function_declaration(use_first_argument_as_this(PAGE_CHANGE_WAIT_JS))
+        .execution_context_id(context_id)
         .arguments(vec![
+            CallArgument::builder().object_id(object_id.clone()).build(),
             string_argument(timeout_ms),
             string_argument(stable_ms),
             string_argument(poll_interval_ms),
@@ -593,11 +640,14 @@ async fn wait_for_scoped_semantic_change(
         .await_promise(true)
         .build()
         .map_err(|e| cdp_error(format!("Failed to build wait call params: {}", e)))?;
-    let call_result = page.execute(call_params).await;
+    let call_result = call_function_awaiting(page, call_params).await;
     let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
-    let resp =
-        call_result.map_err(|e| cdp_error(format!("Failed to wait for page change: {}", e)))?;
-    semantic_wait_value_from_call(resp.result)
+    call_result.map_err(|e| {
+        e.into_tool_error(
+            PAGE_CHANGE_WAIT_EXCEPTION_PREFIX,
+            PAGE_CHANGE_WAIT_TRANSPORT_PREFIX,
+        )
+    })
 }
 
 fn decorate_semantic_wait_result(
@@ -673,12 +723,20 @@ pub async fn cdp_wait_for_page_change(
                     Ok(backend_node_id) => backend_node_id,
                     Err(e) => return e,
                 };
-            let object_id = match resolve_scope_object_id(uid, backend_node_id, &page).await {
-                Ok(object_id) => object_id,
-                Err(e) => return e,
+            let context_id = match main_world_context(&page).await {
+                Ok(id) => id,
+                Err(msg) => {
+                    return cdp_error(format!("{}: {}", PAGE_CHANGE_WAIT_TRANSPORT_PREFIX, msg))
+                }
             };
+            let object_id =
+                match resolve_scope_object_id(uid, backend_node_id, context_id, &page).await {
+                    Ok(object_id) => object_id,
+                    Err(e) => return e,
+                };
             match wait_for_scoped_semantic_change(
                 &page,
+                context_id,
                 object_id,
                 raw_timeout,
                 stable,
@@ -1268,4 +1326,40 @@ pub async fn cdp_take_dom_snapshot(
     client.last_dom_snapshot = Some(snapshot_map);
 
     CallToolResult::success(vec![Content::text(output)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chromiumoxide::cdp::js_protocol::runtime::ExceptionDetails;
+
+    #[test]
+    fn request_timeout_outlasts_longest_page_change_wait() {
+        let longest_wait = std::time::Duration::from_millis(MAX_PAGE_CHANGE_WAIT_TIMEOUT_MS);
+        assert!(
+            CDP_REQUEST_TIMEOUT > longest_wait,
+            "CDP request timeout {:?} must exceed the longest in-page wait {:?}",
+            CDP_REQUEST_TIMEOUT,
+            longest_wait
+        );
+    }
+
+    #[test]
+    fn javascript_exception_maps_to_exception_with_its_text() {
+        let details = ExceptionDetails::new(1, "Uncaught TypeError: boom", 0, 0);
+        let err = JsCallError::from(CdpError::JavascriptException(Box::new(details)));
+        assert_eq!(
+            err,
+            JsCallError::Exception("Uncaught TypeError: boom".to_string())
+        );
+    }
+
+    #[test]
+    fn request_timeout_maps_to_transport_error_naming_the_limit() {
+        let err = JsCallError::from(CdpError::Timeout);
+        assert_eq!(
+            err,
+            JsCallError::Transport("no response within the 65 s CDP request timeout".to_string())
+        );
+    }
 }
