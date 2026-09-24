@@ -312,10 +312,60 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Server name used for the entry that `setup` writes into `mcpServers`.
+const SERVER_NAME: &str = "native-devtools";
+
 fn config_has_native_devtools(path: &std::path::Path) -> bool {
     std::fs::read_to_string(path)
-        .map(|content| content.contains("native-devtools"))
-        .unwrap_or(false)
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .is_some_and(|json| has_native_devtools_server(&json))
+}
+
+/// Returns `true` if the client config already declares a native-devtools MCP
+/// server in its top-level `mcpServers` map — the location `setup` writes to.
+///
+/// Claude Desktop, Cursor, and Claude Code (user scope) all read top-level
+/// `mcpServers`. Claude Code also keeps per-project servers under
+/// `projects.<path>.mcpServers`, but those only apply inside that one project,
+/// so they do not count as configured. Other keys in `~/.claude.json`
+/// (project paths, history) are ignored even if they mention native-devtools.
+fn has_native_devtools_server(config: &serde_json::Value) -> bool {
+    config
+        .get("mcpServers")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|servers| {
+            servers
+                .iter()
+                .any(|(name, entry)| name == SERVER_NAME || entry_launches_native_devtools(entry))
+        })
+}
+
+/// Detects an entry registered under a different name that still launches
+/// this server, either by binary path or via an npm package argument.
+fn entry_launches_native_devtools(entry: &serde_json::Value) -> bool {
+    let is_our_binary = |value: &str| {
+        let file_name = value.rsplit(['/', '\\']).next().unwrap_or(value);
+        let file_name = file_name.strip_suffix(".exe").unwrap_or(file_name);
+        file_name == "native-devtools-mcp"
+    };
+    let is_our_package =
+        |value: &str| value == "native-devtools-mcp" || value.starts_with("native-devtools-mcp@");
+
+    let command_matches = entry
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_our_binary);
+    let args_match = entry
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|args| {
+            args.iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|arg| is_our_package(arg) || is_our_binary(arg))
+        });
+
+    command_matches || args_match
 }
 
 fn write_client_config(client: &ClientInfo) -> Result<(), String> {
@@ -340,7 +390,7 @@ fn write_client_config(client: &ClientInfo) -> Result<(), String> {
     mcp_servers
         .as_object_mut()
         .ok_or("mcpServers is not a JSON object")?
-        .insert("native-devtools".to_string(), client.server_config.clone());
+        .insert(SERVER_NAME.to_string(), client.server_config.clone());
 
     // Write back
     let formatted =
@@ -369,4 +419,98 @@ fn print_manual_config() {
     println!("      \"args\": [\"-y\", \"native-devtools-mcp\"]");
     println!("    }}{RESET}");
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn claude_code_project_history_mentioning_checkout_is_not_configured() {
+        // ~/.claude.json with a project entry for a native-devtools-mcp
+        // checkout, but no MCP server registered anywhere.
+        let config = json!({
+            "numStartups": 12,
+            "projects": {
+                "/Users/example/src/native-devtools-mcp": {
+                    "allowedTools": [],
+                    "history": [{ "display": "fix native-devtools setup" }],
+                    "mcpServers": {}
+                }
+            },
+            "mcpServers": {
+                "other-server": { "command": "npx", "args": ["-y", "other-mcp"] }
+            }
+        });
+
+        assert!(!has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn claude_code_project_scoped_server_is_not_user_configured() {
+        let config = json!({
+            "projects": {
+                "/Users/example/app": {
+                    "mcpServers": {
+                        "native-devtools": { "command": "npx", "args": ["-y", "native-devtools-mcp"] }
+                    }
+                }
+            }
+        });
+
+        assert!(!has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn top_level_entry_named_native_devtools_is_configured() {
+        let config = json!({
+            "mcpServers": {
+                "native-devtools": {
+                    "command": "/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp"
+                }
+            }
+        });
+
+        assert!(has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn entry_under_other_name_running_npx_package_is_configured() {
+        let config = json!({
+            "mcpServers": {
+                "desktop": { "command": "npx", "args": ["-y", "native-devtools-mcp@0.9.0"] }
+            }
+        });
+
+        assert!(has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn entry_under_other_name_running_windows_binary_is_configured() {
+        let config = json!({
+            "mcpServers": {
+                "desktop": { "command": "C:\\Tools\\native-devtools-mcp.exe" }
+            }
+        });
+
+        assert!(has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn similarly_named_package_is_not_configured() {
+        let config = json!({
+            "mcpServers": {
+                "devtools": { "command": "npx", "args": ["-y", "native-devtools-mcp-proxy"] }
+            }
+        });
+
+        assert!(!has_native_devtools_server(&config));
+    }
+
+    #[test]
+    fn config_without_mcp_servers_is_not_configured() {
+        assert!(!has_native_devtools_server(&json!({ "theme": "dark" })));
+        assert!(!has_native_devtools_server(&json!([])));
+    }
 }
