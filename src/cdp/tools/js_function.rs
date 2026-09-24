@@ -10,12 +10,21 @@
 //! template and regex literals and comments, and matches brackets, which is
 //! enough to see where a function's parameter list and body end.
 
-/// Returns `true` when the whole trimmed `source` is one function
-/// expression: `function ...`, `async function ...`, an arrow function
-/// (`x => ...`, `(a, b) => ...`, `async (...) => ...`, `async x => ...`), or
-/// one of these wrapped in parentheses.
-pub(crate) fn is_function_expression(source: &str) -> bool {
-    let source = source.trim();
+/// If the whole `source` is one function expression, return the part to
+/// call: `source` without surrounding whitespace and without one trailing
+/// `;`. Leading and trailing comments are allowed; the caller must put a
+/// newline before any closing bracket it adds after the returned text.
+///
+/// Function expressions are `function ...`, `async function ...`, arrow
+/// functions (`x => ...`, `(a, b) => ...`, `async (...) => ...`,
+/// `async x => ...`), and any of these wrapped in parentheses.
+pub(crate) fn function_expression_source(source: &str) -> Option<&str> {
+    let source = strip_trailing_semicolon(source.trim())?;
+    is_function_expression(source).then_some(source)
+}
+
+fn is_function_expression(source: &str) -> bool {
+    let source = skip_leading_comments(source.trim());
     if let Some(inner) = strip_enclosing_parens(source) {
         return is_function_expression(inner);
     }
@@ -28,6 +37,39 @@ pub(crate) fn is_function_expression(source: &str) -> bool {
     is_function_keyword_expression(source) || is_arrow_function(source)
 }
 
+/// `source` up to (not including) its last code token, if that token is a
+/// `;`. Comments after it are dropped too. `None` if `source` has an
+/// unclosed literal or comment.
+fn strip_trailing_semicolon(source: &str) -> Option<&str> {
+    let tokens = code_chars(source)?;
+    match tokens.last() {
+        Some(&(pos, ';')) => Some(source[..pos].trim_end()),
+        _ => Some(source),
+    }
+}
+
+/// `source` without leading `//` and `/* */` comments and whitespace.
+fn skip_leading_comments(mut source: &str) -> &str {
+    loop {
+        source = source.trim_start();
+        if let Some(rest) = source.strip_prefix("//") {
+            source = rest.find('\n').map_or("", |i| &rest[i..]);
+        } else if let Some(rest) = source.strip_prefix("/*") {
+            match rest.find("*/") {
+                Some(i) => source = &rest[i + 2..],
+                None => return source,
+            }
+        } else {
+            return source;
+        }
+    }
+}
+
+/// Whether `source` holds only whitespace and comments.
+fn is_blank(source: &str) -> bool {
+    code_chars(source).is_some_and(|tokens| tokens.is_empty())
+}
+
 /// `function [*] [name] (params) { body }` with nothing after the body.
 fn is_function_keyword_expression(source: &str) -> bool {
     let Some(rest) = strip_keyword(source, "function") else {
@@ -38,8 +80,8 @@ fn is_function_keyword_expression(source: &str) -> bool {
     let Some(after_params) = skip_bracketed(rest, '(') else {
         return false;
     };
-    match skip_bracketed(after_params.trim_start(), '{') {
-        Some(after_body) => after_body.trim().is_empty(),
+    match skip_bracketed(skip_leading_comments(after_params), '{') {
+        Some(after_body) => is_blank(after_body),
         None => false,
     }
 }
@@ -61,10 +103,10 @@ fn is_arrow_function(source: &str) -> bool {
     let Some(body) = after_params.trim_start().strip_prefix("=>") else {
         return false;
     };
-    let body = body.trim();
+    let body = skip_leading_comments(body);
     if body.starts_with('{') {
         return match skip_bracketed(body, '{') {
-            Some(after_body) => after_body.trim().is_empty(),
+            Some(after_body) => is_blank(after_body),
             None => false,
         };
     }
@@ -96,7 +138,7 @@ fn is_single_expression(source: &str) -> bool {
 /// return what is inside them.
 fn strip_enclosing_parens(source: &str) -> Option<&str> {
     let rest = skip_bracketed(source, '(')?;
-    if rest.trim().is_empty() {
+    if is_blank(rest) {
         Some(&source[1..source.len() - rest.len() - 1])
     } else {
         None
@@ -241,7 +283,7 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
                     .position(|w| w[0].1 == '*' && w[1].1 == '/')?;
                 i = i + 2 + close + 2;
             }
-            '/' if starts_regex(out.last().map(|&(_, ch)| ch), &previous_word) => {
+            '/' if starts_regex(&out, &previous_word) => {
                 emit(&mut out, &template_stack, (pos, '"'));
                 i = skip_regex(&chars, i + 1)?;
             }
@@ -278,13 +320,21 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
     }
 }
 
-/// Whether a `/` after `previous` (last code char) and `previous_word`
-/// (identifier or keyword right before it, if any) starts a regex literal.
-fn starts_regex(previous: Option<char>, previous_word: &str) -> bool {
+/// Whether a `/` after the code chars `before` starts a regex literal
+/// rather than a division. `previous_word` is the identifier or keyword
+/// right before the `/`, if any.
+fn starts_regex(before: &[(usize, char)], previous_word: &str) -> bool {
+    let mut recent = before.iter().rev().map(|&(_, c)| c);
+    let Some(previous) = recent.next() else {
+        return true;
+    };
     match previous {
-        None => true,
-        Some(c) if is_identifier_char(c) => REGEX_PRECEDING_KEYWORDS.contains(&previous_word),
-        Some(c) => "(,=:[!&|?{};+-*%<>~^".contains(c),
+        // After an identifier or number: division, unless it is a keyword
+        // such as `return` that expects an expression.
+        c if is_identifier_char(c) => REGEX_PRECEDING_KEYWORDS.contains(&previous_word),
+        // Postfix `i++ /` and `i-- /` end an operand: division.
+        '+' | '-' => recent.next() != Some(previous),
+        c => "(,=:[!&|?{};*%<>~^".contains(c),
     }
 }
 
@@ -351,7 +401,11 @@ fn skip_regex(chars: &[(usize, char)], start: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_function_expression;
+    use super::function_expression_source;
+
+    fn is_function_expression(source: &str) -> bool {
+        function_expression_source(source).is_some()
+    }
 
     // --- Function expressions: called as an IIFE ---
 
@@ -455,6 +509,95 @@ mod tests {
     #[test]
     fn division_in_concise_body_is_function() {
         assert!(is_function_expression("el => el.clientWidth / 2"));
+    }
+
+    #[test]
+    fn leading_line_comment_before_arrow_is_function() {
+        assert!(is_function_expression("// title\n() => document.title"));
+    }
+
+    #[test]
+    fn leading_block_comment_before_arrow_is_function() {
+        assert!(is_function_expression("/* title */ () => document.title"));
+    }
+
+    #[test]
+    fn trailing_line_comment_after_block_body_is_function() {
+        assert!(is_function_expression("() => { return 1; } // done"));
+    }
+
+    #[test]
+    fn trailing_line_comment_after_concise_body_is_function() {
+        assert!(is_function_expression("() => document.title // title"));
+    }
+
+    #[test]
+    fn division_after_postfix_increment_is_function() {
+        assert!(is_function_expression("() => i++ / 2"));
+    }
+
+    #[test]
+    fn division_after_postfix_decrement_is_function() {
+        assert!(is_function_expression("() => i-- / 2"));
+    }
+
+    #[test]
+    fn division_after_closing_paren_is_function() {
+        assert!(is_function_expression("() => (a + b) / 2"));
+    }
+
+    #[test]
+    fn division_after_closing_bracket_is_function() {
+        assert!(is_function_expression("() => values[0] / 2"));
+    }
+
+    #[test]
+    fn division_after_number_is_function() {
+        assert!(is_function_expression("() => 10 / 2"));
+    }
+
+    #[test]
+    fn trailing_semicolon_after_concise_body_is_function() {
+        assert!(is_function_expression("() => document.title;"));
+    }
+
+    #[test]
+    fn trailing_semicolon_after_function_body_is_function() {
+        assert!(is_function_expression("function() { return 1; };"));
+    }
+
+    #[test]
+    fn trailing_semicolon_is_removed_from_callable_source() {
+        assert_eq!(
+            function_expression_source("  () => document.title;  "),
+            Some("() => document.title")
+        );
+    }
+
+    #[test]
+    fn trailing_semicolon_and_comment_are_removed_from_callable_source() {
+        assert_eq!(
+            function_expression_source("() => 1; // one"),
+            Some("() => 1")
+        );
+    }
+
+    #[test]
+    fn semicolon_inside_block_body_is_kept_in_callable_source() {
+        assert_eq!(
+            function_expression_source("() => { return 1; }"),
+            Some("() => { return 1; }")
+        );
+    }
+
+    #[test]
+    fn two_trailing_semicolons_are_not_function() {
+        assert!(!is_function_expression("() => 1;;"));
+    }
+
+    #[test]
+    fn statement_list_ending_in_semicolon_is_not_function() {
+        assert!(!is_function_expression("const f = () => 1; f();"));
     }
 
     // --- Other expressions: evaluated as is ---
