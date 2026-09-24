@@ -334,7 +334,9 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     needs: build
-    runs-on: ubuntu-latest
+    # `cargo publish` compiles the crate before uploading, and the crate only
+    # builds on macOS and Windows (no Linux platform backend).
+    runs-on: macos-14
     permissions:
       contents: read
       # OIDC Trusted Publishing — crates.io mints a short-lived token per run,
