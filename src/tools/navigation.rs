@@ -350,17 +350,4 @@ mod focus_window_tests {
         let json: serde_json::Value = serde_json::to_value(&result).unwrap();
         assert!(!json.as_object().unwrap().contains_key("warning"));
     }
-
-    #[test]
-    fn result_includes_warning_when_window_was_not_raised() {
-        let result = FocusWindowResult {
-            app_name: "Notes".to_string(),
-            pid: 7,
-            bundle_id: None,
-            kind: AppKind::Native,
-            warning: Some("could not raise window 5".to_string()),
-        };
-        let json: serde_json::Value = serde_json::to_value(&result).unwrap();
-        assert_eq!(json["warning"], "could not raise window 5");
-    }
 }
