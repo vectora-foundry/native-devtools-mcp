@@ -1,6 +1,7 @@
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use super::install_source::{self, InstallSource};
 use super::{BOLD, DIM, GREEN, RED, RESET, YELLOW};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -156,12 +157,13 @@ fn configure_mcp_clients() {
     println!("{BOLD}Step 2: MCP Client Configuration{RESET}");
     println!();
 
-    let detected = detect_clients();
+    let install = InstallContext::detect();
+    let detected = detect_clients(&install);
 
     if detected.is_empty() {
         println!("  No MCP clients detected.");
         println!();
-        print_manual_config();
+        print_manual_config(&install);
         return;
     }
 
@@ -175,10 +177,19 @@ fn configure_mcp_clients() {
             continue;
         }
 
+        let server_config = match &client.server_config {
+            Ok(server_config) => server_config,
+            Err(reason) => {
+                println!("  {YELLOW}!{RESET} {reason}");
+                println!();
+                continue;
+            }
+        };
+
         println!();
         println!("  Add this to your MCP configuration:");
         println!();
-        for line in client.config_snippet.lines() {
+        for line in config_snippet(server_config).lines() {
             println!("    {DIM}{line}{RESET}");
         }
         println!();
@@ -189,7 +200,7 @@ fn configure_mcp_clients() {
         let _ = io::stdin().read_line(&mut answer);
 
         if answer.trim().eq_ignore_ascii_case("y") {
-            match write_client_config(client) {
+            match write_client_config(&client.config_path, server_config) {
                 Ok(()) => println!("  {GREEN}✓{RESET} Config written successfully."),
                 Err(e) => println!("  {RED}✗{RESET} Failed to write config: {e}"),
             }
@@ -203,36 +214,130 @@ fn configure_mcp_clients() {
 struct ClientInfo {
     name: &'static str,
     config_path: PathBuf,
-    config_snippet: &'static str,
-    server_config: serde_json::Value,
+    /// Server entry to write, or why setup cannot write a working one.
+    server_config: Result<serde_json::Value, &'static str>,
     already_configured: bool,
 }
 
-/// npx-based server config used by most MCP clients.
-fn npx_server_config() -> serde_json::Value {
-    serde_json::json!({
-        "command": "npx",
-        "args": ["-y", "native-devtools-mcp"]
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientKind {
+    ClaudeDesktop,
+    ClaudeCode,
+    Cursor,
 }
 
-const NPX_SNIPPET: &str = r#""native-devtools": {
-  "command": "npx",
-  "args": ["-y", "native-devtools-mcp"]
-}"#;
+/// How an MCP client should launch the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ServerLaunch {
+    /// `npx -y native-devtools-mcp` — resolves the npm platform package.
+    Npx,
+    /// Run this binary directly.
+    Executable(PathBuf),
+}
 
-#[cfg(target_os = "macos")]
-const CLAUDE_DESKTOP_SNIPPET: &str = r#""native-devtools": {
-  "command": "/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp"
-}"#;
+impl ServerLaunch {
+    fn to_server_config(&self) -> serde_json::Value {
+        match self {
+            ServerLaunch::Npx => serde_json::json!({
+                "command": "npx",
+                "args": ["-y", "native-devtools-mcp"]
+            }),
+            ServerLaunch::Executable(path) => serde_json::json!({
+                "command": path.to_string_lossy()
+            }),
+        }
+    }
+}
 
-#[cfg(target_os = "windows")]
-const CLAUDE_DESKTOP_SNIPPET: &str = NPX_SNIPPET;
+/// Where the DMG installs the signed app bundle's binary.
+const MAC_APP_BINARY: &str = "/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp";
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const CLAUDE_DESKTOP_SNIPPET: &str = NPX_SNIPPET;
+const CLAUDE_DESKTOP_NEEDS_APP_BUNDLE: &str =
+    "Claude Desktop on macOS needs the signed app bundle (Gatekeeper blocks npx).\n    \
+     Download NativeDevtools-X.X.X.dmg from GitHub Releases, drag it to /Applications,\n    \
+     then run setup again.";
 
-fn detect_clients() -> Vec<ClientInfo> {
+/// What setup knows about the running binary and the machine.
+struct InstallContext {
+    exe_path: PathBuf,
+    source: InstallSource,
+    /// The DMG app binary, if it is installed.
+    installed_app_binary: Option<PathBuf>,
+    is_macos: bool,
+}
+
+impl InstallContext {
+    fn detect() -> Self {
+        let (exe_path, source) = install_source::detect_current().unwrap_or_else(|_| {
+            // Unreachable in practice; fall back to a PATH lookup.
+            (PathBuf::from("native-devtools-mcp"), InstallSource::Unknown)
+        });
+        let is_macos = cfg!(target_os = "macos");
+        let app_binary = PathBuf::from(MAC_APP_BINARY);
+        let installed_app_binary = (is_macos && app_binary.is_file()).then_some(app_binary);
+        Self {
+            exe_path,
+            source,
+            installed_app_binary,
+            is_macos,
+        }
+    }
+
+    fn server_config_for(&self, client: ClientKind) -> Result<serde_json::Value, &'static str> {
+        resolve_server_launch(
+            client,
+            self.source,
+            &self.exe_path,
+            self.installed_app_binary.as_deref(),
+            self.is_macos,
+        )
+        .map(|launch| launch.to_server_config())
+    }
+}
+
+/// Picks the launch command for `client`, based on how the user installed
+/// the server.
+///
+/// - Claude Desktop on macOS runs the signed app bundle: Gatekeeper blocks
+///   the npx binary there, and the bundle keeps a stable identity for the
+///   Accessibility / Screen Recording (TCC) grants. The bundle is used when
+///   setup runs from it or when it is installed in `/Applications`. A
+///   locally built binary (cargo/source/archive) runs by absolute path. An
+///   npm-only install has no working option, so this returns an error.
+/// - Other clients use npx for npm installs (matches the npm workflow and
+///   picks up updates), and the running binary's absolute path otherwise,
+///   so cargo and source users do not need Node.js or a published package.
+fn resolve_server_launch(
+    client: ClientKind,
+    source: InstallSource,
+    exe_path: &Path,
+    installed_app_binary: Option<&Path>,
+    is_macos: bool,
+) -> Result<ServerLaunch, &'static str> {
+    let executable = || ServerLaunch::Executable(exe_path.to_path_buf());
+
+    if client == ClientKind::ClaudeDesktop && is_macos {
+        return match (source, installed_app_binary) {
+            (InstallSource::MacAppBundle, _) => Ok(executable()),
+            (_, Some(app_binary)) => Ok(ServerLaunch::Executable(app_binary.to_path_buf())),
+            (InstallSource::NpmPackage, None) => Err(CLAUDE_DESKTOP_NEEDS_APP_BUNDLE),
+            (_, None) => Ok(executable()),
+        };
+    }
+
+    match source {
+        InstallSource::NpmPackage => Ok(ServerLaunch::Npx),
+        _ => Ok(executable()),
+    }
+}
+
+/// Renders the `"native-devtools": { ... }` snippet shown to the user.
+fn config_snippet(server_config: &serde_json::Value) -> String {
+    let body = serde_json::to_string_pretty(server_config).unwrap_or_default();
+    format!("\"{SERVER_NAME}\": {body}")
+}
+
+fn detect_clients(install: &InstallContext) -> Vec<ClientInfo> {
     let mut clients = Vec::new();
     let home = match home_dir() {
         Some(h) => h,
@@ -248,50 +353,30 @@ fn detect_clients() -> Vec<ClientInfo> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let claude_desktop_path = home.join(".config/Claude/claude_desktop_config.json");
 
-    if claude_desktop_path.exists() {
-        #[cfg(target_os = "macos")]
-        let server_config = serde_json::json!({
-            "command": "/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp"
-        });
-        #[cfg(not(target_os = "macos"))]
-        let server_config = npx_server_config();
+    let candidates = [
+        (
+            "Claude Desktop",
+            ClientKind::ClaudeDesktop,
+            claude_desktop_path,
+        ),
+        (
+            "Claude Code",
+            ClientKind::ClaudeCode,
+            home.join(".claude.json"),
+        ),
+        ("Cursor", ClientKind::Cursor, home.join(".cursor/mcp.json")),
+    ];
 
+    for (name, kind, config_path) in candidates {
+        if !config_path.exists() {
+            continue;
+        }
         clients.push(ClientInfo {
-            name: "Claude Desktop",
-            config_path: claude_desktop_path,
-            config_snippet: CLAUDE_DESKTOP_SNIPPET,
-            server_config,
-            already_configured: false, // set below
+            name,
+            already_configured: config_has_native_devtools(&config_path),
+            server_config: install.server_config_for(kind),
+            config_path,
         });
-    }
-
-    // Claude Code
-    let claude_code_path = home.join(".claude.json");
-    if claude_code_path.exists() {
-        clients.push(ClientInfo {
-            name: "Claude Code",
-            config_path: claude_code_path,
-            config_snippet: NPX_SNIPPET,
-            server_config: npx_server_config(),
-            already_configured: false,
-        });
-    }
-
-    // Cursor
-    let cursor_path = home.join(".cursor/mcp.json");
-    if cursor_path.exists() {
-        clients.push(ClientInfo {
-            name: "Cursor",
-            config_path: cursor_path,
-            config_snippet: NPX_SNIPPET,
-            server_config: npx_server_config(),
-            already_configured: false,
-        });
-    }
-
-    // Check which are already configured
-    for client in &mut clients {
-        client.already_configured = config_has_native_devtools(&client.config_path);
     }
 
     clients
@@ -368,16 +453,18 @@ fn entry_launches_native_devtools(entry: &serde_json::Value) -> bool {
     command_matches || args_match
 }
 
-fn write_client_config(client: &ClientInfo) -> Result<(), String> {
-    let content =
-        std::fs::read_to_string(&client.config_path).map_err(|e| format!("read error: {e}"))?;
+fn write_client_config(
+    config_path: &Path,
+    server_config: &serde_json::Value,
+) -> Result<(), String> {
+    let content = std::fs::read_to_string(config_path).map_err(|e| format!("read error: {e}"))?;
 
     let mut json: serde_json::Value =
         serde_json::from_str(&content).map_err(|e| format!("JSON parse error: {e}"))?;
 
     // Create backup
-    let backup_path = client.config_path.with_extension("json.backup");
-    std::fs::copy(&client.config_path, &backup_path).map_err(|e| format!("backup failed: {e}"))?;
+    let backup_path = config_path.with_extension("json.backup");
+    std::fs::copy(config_path, &backup_path).map_err(|e| format!("backup failed: {e}"))?;
     println!("  {DIM}Backed up to: {}{RESET}", backup_path.display());
 
     // Add or merge mcpServers
@@ -390,35 +477,42 @@ fn write_client_config(client: &ClientInfo) -> Result<(), String> {
     mcp_servers
         .as_object_mut()
         .ok_or("mcpServers is not a JSON object")?
-        .insert(SERVER_NAME.to_string(), client.server_config.clone());
+        .insert(SERVER_NAME.to_string(), server_config.clone());
 
     // Write back
     let formatted =
         serde_json::to_string_pretty(&json).map_err(|e| format!("JSON serialize error: {e}"))?;
-    std::fs::write(&client.config_path, formatted).map_err(|e| format!("write error: {e}"))?;
+    std::fs::write(config_path, formatted).map_err(|e| format!("write error: {e}"))?;
 
     Ok(())
 }
 
-fn print_manual_config() {
+fn print_manual_config(install: &InstallContext) {
     println!("  To configure manually, add this to your MCP client config:");
     println!();
 
-    #[cfg(target_os = "macos")]
-    {
-        println!("  For Claude Desktop (macOS, recommended):");
-        println!("    {DIM}\"native-devtools\": {{");
-        println!("      \"command\": \"/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp\"");
-        println!("    }}{RESET}");
+    let print_snippet = |server_config: &serde_json::Value| {
+        for line in config_snippet(server_config).lines() {
+            println!("    {DIM}{line}{RESET}");
+        }
         println!();
+    };
+
+    if install.is_macos {
+        println!("  For Claude Desktop (macOS):");
+        match install.server_config_for(ClientKind::ClaudeDesktop) {
+            Ok(server_config) => print_snippet(&server_config),
+            Err(reason) => {
+                println!("    {reason}");
+                println!();
+            }
+        }
     }
 
     println!("  For Claude Code / Cursor / other MCP clients:");
-    println!("    {DIM}\"native-devtools\": {{");
-    println!("      \"command\": \"npx\",");
-    println!("      \"args\": [\"-y\", \"native-devtools-mcp\"]");
-    println!("    }}{RESET}");
-    println!();
+    if let Ok(server_config) = install.server_config_for(ClientKind::ClaudeCode) {
+        print_snippet(&server_config);
+    }
 }
 
 #[cfg(test)]
@@ -512,5 +606,115 @@ mod tests {
     fn config_without_mcp_servers_is_not_configured() {
         assert!(!has_native_devtools_server(&json!({ "theme": "dark" })));
         assert!(!has_native_devtools_server(&json!([])));
+    }
+
+    const APP_BINARY: &str = "/Applications/NativeDevtools.app/Contents/MacOS/native-devtools-mcp";
+    const NPX_EXE: &str = "/Users/example/.npm/_npx/0a1b2c/node_modules/@sh3ll3x3c/native-devtools-mcp-darwin-arm64/bin/native-devtools-mcp";
+    const CARGO_EXE: &str = "/Users/example/.cargo/bin/native-devtools-mcp";
+
+    fn exe(path: &str) -> ServerLaunch {
+        ServerLaunch::Executable(PathBuf::from(path))
+    }
+
+    #[test]
+    fn claude_desktop_mac_npx_run_with_app_installed_uses_app_bundle() {
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeDesktop,
+            InstallSource::NpmPackage,
+            Path::new(NPX_EXE),
+            Some(Path::new(APP_BINARY)),
+            true,
+        );
+        assert_eq!(launch, Ok(exe(APP_BINARY)));
+    }
+
+    #[test]
+    fn claude_desktop_mac_npx_run_without_app_refuses_to_write() {
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeDesktop,
+            InstallSource::NpmPackage,
+            Path::new(NPX_EXE),
+            None,
+            true,
+        );
+        assert_eq!(launch, Err(CLAUDE_DESKTOP_NEEDS_APP_BUNDLE));
+    }
+
+    #[test]
+    fn claude_desktop_mac_cargo_install_without_app_uses_cargo_binary() {
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeDesktop,
+            InstallSource::CargoInstall,
+            Path::new(CARGO_EXE),
+            None,
+            true,
+        );
+        assert_eq!(launch, Ok(exe(CARGO_EXE)));
+    }
+
+    #[test]
+    fn claude_desktop_mac_run_from_app_bundle_uses_that_bundle() {
+        let bundle_in_downloads =
+            "/Users/example/Downloads/NativeDevtools.app/Contents/MacOS/native-devtools-mcp";
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeDesktop,
+            InstallSource::MacAppBundle,
+            Path::new(bundle_in_downloads),
+            None,
+            true,
+        );
+        assert_eq!(launch, Ok(exe(bundle_in_downloads)));
+    }
+
+    #[test]
+    fn claude_desktop_windows_npm_install_uses_npx() {
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeDesktop,
+            InstallSource::NpmPackage,
+            Path::new("C:/Users/example/AppData/Roaming/npm/node_modules/@sh3ll3x3c/native-devtools-mcp-win32-x64/bin/native-devtools-mcp.exe"),
+            None,
+            false,
+        );
+        assert_eq!(launch, Ok(ServerLaunch::Npx));
+    }
+
+    #[test]
+    fn claude_code_npm_install_uses_npx_even_with_app_installed() {
+        let launch = resolve_server_launch(
+            ClientKind::ClaudeCode,
+            InstallSource::NpmPackage,
+            Path::new(NPX_EXE),
+            Some(Path::new(APP_BINARY)),
+            true,
+        );
+        assert_eq!(launch, Ok(ServerLaunch::Npx));
+    }
+
+    #[test]
+    fn cursor_source_build_uses_built_binary() {
+        let built = "/Users/example/src/native-devtools-mcp/target/release/native-devtools-mcp";
+        let launch = resolve_server_launch(
+            ClientKind::Cursor,
+            InstallSource::SourceBuild,
+            Path::new(built),
+            None,
+            true,
+        );
+        assert_eq!(launch, Ok(exe(built)));
+    }
+
+    #[test]
+    fn executable_launch_writes_command_without_args() {
+        let config = exe(CARGO_EXE).to_server_config();
+        assert_eq!(config, json!({ "command": CARGO_EXE }));
+    }
+
+    #[test]
+    fn npx_launch_writes_npx_with_package_args() {
+        let config = ServerLaunch::Npx.to_server_config();
+        assert_eq!(
+            config,
+            json!({ "command": "npx", "args": ["-y", "native-devtools-mcp"] })
+        );
     }
 }
