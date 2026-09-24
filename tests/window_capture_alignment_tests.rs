@@ -7,7 +7,7 @@
 //! This ensures clicking at pixel coordinates derived from screenshots
 //! will land on the intended UI elements.
 //!
-//! Run with: cargo test --test window_capture_alignment_tests -- --nocapture
+//! Run with: cargo test --test window_capture_alignment_tests -- --ignored --nocapture
 
 #![cfg(target_os = "macos")]
 
@@ -210,6 +210,7 @@ mod window_capture_alignment {
     /// This is the core alignment test. If this fails, click coordinates derived
     /// from screenshots will be offset from intended targets.
     #[test]
+    #[ignore = "requires an on-screen app window and Screen Recording permission — run with `cargo test --test window_capture_alignment_tests -- --ignored`"]
     fn test_screenshot_dimensions_match_bounds() {
         let Some(window_id) = find_testable_window() else {
             println!("No testable window found - skipping test");
