@@ -147,8 +147,8 @@ enum JsArg<'a> {
 /// `callFunctionOn` with the element's `objectId` through `Page::execute`,
 /// which stays limited to chromiumoxide's fixed 30 s.
 ///
-/// All remote objects are created in one object group, released after the
-/// call even when `limit` cut it off.
+/// All remote objects are created in one object group, released in the
+/// background after the call, even when `limit` cut it off.
 async fn call_function_on_element(
     page: &Page,
     function_declaration: &str,
@@ -165,9 +165,15 @@ async fn call_function_on_element(
         &object_group,
     );
     let result = bounded(limit, call).await;
-    let _ = page
-        .execute(ReleaseObjectGroupParams::new(object_group))
-        .await;
+    // Release in the background: after a timeout the renderer may still be
+    // busy running the script, and `Page::execute` would then wait up to its
+    // fixed 30 s before the tool could answer.
+    let release_page = page.clone();
+    tokio::spawn(async move {
+        let _ = release_page
+            .execute(ReleaseObjectGroupParams::new(object_group))
+            .await;
+    });
     result
 }
 
