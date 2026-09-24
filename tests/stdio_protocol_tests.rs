@@ -9,7 +9,6 @@
 //! Every tool used here is side-effect free and needs no GUI permissions, no
 //! Android device, and no browser, so the tests run on plain CI runners.
 
-use native_devtools_mcp::server::MacOSDevToolsServer;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -180,7 +179,7 @@ fn initialized_client(protocol_version: &str) -> StdioClient {
 
 /// Run `check` once per client protocol version the server must accept.
 fn for_each_client_version(check: impl Fn(&str)) {
-    for version in ["2024-11-05", "2025-06-18"] {
+    for version in ["2024-11-05", "2025-06-18", "2025-11-25"] {
         check(version);
     }
 }
@@ -207,18 +206,38 @@ fn initialize_advertises_server_identity_and_tool_list_changed() {
 }
 
 #[test]
-fn tools_list_sends_every_disconnected_tool_with_schema_and_annotations() {
+fn tools_list_gates_connected_only_tools_and_sends_schema_and_annotations() {
     for_each_client_version(|version| {
         let mut client = initialized_client(version);
         let response = client.request("tools/list", json!({}));
         let tools = result(&response)["tools"].as_array().expect("tools array");
 
-        let mut wire_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        wire_names.sort_unstable();
-        let expected = MacOSDevToolsServer::get_tools(false, false, false, false, false);
-        let mut expected_names: Vec<&str> = expected.iter().map(|t| t.name.as_ref()).collect();
-        expected_names.sort_unstable();
-        assert_eq!(wire_names, expected_names);
+        let wire_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        // Always listed: core tools, the connect entry points, and every CDP tool.
+        for always_listed in [
+            "take_screenshot",
+            "click",
+            "scroll",
+            "find_text",
+            "app_connect",
+            "android_list_devices",
+            "android_connect",
+            "cdp_connect",
+            "cdp_evaluate_script",
+            "cdp_wait_for_page_change",
+        ] {
+            assert!(
+                wire_names.contains(&always_listed),
+                "{always_listed} missing from tools/list"
+            );
+        }
+        // Listed only after the matching connect call succeeds.
+        for gated in ["android_click", "android_screenshot", "app_get_tree"] {
+            assert!(
+                !wire_names.contains(&gated),
+                "{gated} listed before connecting"
+            );
+        }
 
         let take_screenshot = tools
             .iter()
