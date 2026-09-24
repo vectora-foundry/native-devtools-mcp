@@ -55,7 +55,7 @@ pub fn run() {
         println!("  To verify an official binary, run this command from the npm package:");
         println!("    npx native-devtools-mcp verify");
         println!();
-        return;
+        std::process::exit(2);
     }
 
     // Step 2: Fetch expected checksums from GitHub
@@ -221,18 +221,11 @@ mod tests {
     const HASH_B: &str = "0000000000000000000000000000000000000000000000000000000000000001";
 
     #[test]
-    fn app_bundle_has_no_published_binary_checksum() {
-        assert!(unpublished_checksum_reason(InstallSource::MacAppBundle).is_some());
-    }
-
-    #[test]
-    fn cargo_install_has_no_published_checksum() {
-        assert!(unpublished_checksum_reason(InstallSource::CargoInstall).is_some());
-    }
-
-    #[test]
-    fn source_build_has_no_published_checksum() {
-        assert!(unpublished_checksum_reason(InstallSource::SourceBuild).is_some());
+    fn unpublished_reasons_name_the_install_mode() {
+        let reason = |source| unpublished_checksum_reason(source).unwrap_or_default();
+        assert!(reason(InstallSource::MacAppBundle).contains("app bundle"));
+        assert!(reason(InstallSource::CargoInstall).contains("cargo install"));
+        assert!(reason(InstallSource::SourceBuild).contains("from source"));
     }
 
     #[test]
