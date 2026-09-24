@@ -2,7 +2,7 @@ use crate::platform;
 use crate::tools::screenshot_cache::{ScreenshotCache, ScreenshotMetadata as CacheMetadata};
 use base64::Engine;
 use image::ImageReader;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 use serde_json::to_string_pretty;
 use std::io::Cursor;
@@ -93,20 +93,20 @@ pub async fn take_screenshot(
                 (None, Some(app_name)) => match platform::find_windows_by_app(app_name) {
                     Ok(windows) if !windows.is_empty() => windows[0].id,
                     Ok(_) => {
-                        return CallToolResult::error(vec![Content::text(format!(
+                        return CallToolResult::error(vec![ContentBlock::text(format!(
                             "No window found for app '{}'",
                             app_name
                         ))]);
                     }
                     Err(e) => {
-                        return CallToolResult::error(vec![Content::text(format!(
+                        return CallToolResult::error(vec![ContentBlock::text(format!(
                             "Failed to find window: {}",
                             e
                         ))]);
                     }
                 },
                 (None, None) => {
-                    return CallToolResult::error(vec![Content::text(
+                    return CallToolResult::error(vec![ContentBlock::text(
                         "window_id or app_name is required for mode='window'",
                     )]);
                 }
@@ -119,7 +119,7 @@ pub async fn take_screenshot(
             let (x, y, w, h) = match (params.x, params.y, params.width, params.height) {
                 (Some(x), Some(y), Some(w), Some(h)) => (x, y, w, h),
                 _ => {
-                    return CallToolResult::error(vec![Content::text(
+                    return CallToolResult::error(vec![ContentBlock::text(
                         "x, y, width, and height are required for mode='region'",
                     )]);
                 }
@@ -127,7 +127,7 @@ pub async fn take_screenshot(
             platform::capture_region(x, y, w, h)
         }
         _ => {
-            return CallToolResult::error(vec![Content::text(format!(
+            return CallToolResult::error(vec![ContentBlock::text(format!(
                 "Unknown mode '{}'. Use 'screen', 'window', or 'region'",
                 params.mode
             ))]);
@@ -166,7 +166,7 @@ pub async fn take_screenshot(
             };
 
             let base64_data = base64::engine::general_purpose::STANDARD.encode(&image_data);
-            let mut contents = vec![Content::image(base64_data, mime_type)];
+            let mut contents = vec![ContentBlock::image(base64_data, mime_type)];
             let metadata = ScreenshotMetadata {
                 screenshot_id,
                 screenshot_origin_x: screenshot.origin_x,
@@ -177,7 +177,7 @@ pub async fn take_screenshot(
                 screenshot_pixel_height: screenshot.pixel_height,
             };
             if let Ok(json) = to_string_pretty(&metadata) {
-                contents.push(Content::text(json));
+                contents.push(ContentBlock::text(json));
             }
 
             // Run OCR if requested
@@ -193,18 +193,21 @@ pub async fn take_screenshot(
                         apply_ocr_offset(&mut matches, screenshot.origin_x, screenshot.origin_y);
                         if !matches.is_empty() {
                             let ocr_text = format_ocr_results(&matches);
-                            contents.push(Content::text(ocr_text));
+                            contents.push(ContentBlock::text(ocr_text));
                         }
                     }
                     Err(e) => {
-                        contents.push(Content::text(format!("OCR failed: {}", e)));
+                        contents.push(ContentBlock::text(format!("OCR failed: {}", e)));
                     }
                 }
             }
 
             CallToolResult::success(contents)
         }
-        Err(e) => CallToolResult::error(vec![Content::text(format!("Screenshot failed: {}", e))]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+            "Screenshot failed: {}",
+            e
+        ))]),
     }
 }
 

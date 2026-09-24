@@ -27,7 +27,7 @@
 use base64::Engine;
 use native_devtools_mcp::cdp::tools::cdp_navigate;
 use native_devtools_mcp::cdp::CdpClient;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -270,7 +270,7 @@ pub fn content_text(result: &CallToolResult) -> String {
     out
 }
 
-fn text_of(content: &Content) -> Option<String> {
+fn text_of(content: &ContentBlock) -> Option<String> {
     content.as_text().map(|t| t.text.clone())
 }
 

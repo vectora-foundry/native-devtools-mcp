@@ -1,3 +1,6 @@
+// The `cocoa` crate is deprecated in favor of `objc2`; this module still uses it.
+#![allow(deprecated)]
+
 use cocoa::base::{id, nil};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;

@@ -5,7 +5,7 @@
 //! place means the wire shape cannot drift between the two handlers.
 
 use crate::tools::ax_snapshot::Rect;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 /// Build a `CallToolResult::success` with body
@@ -21,7 +21,7 @@ pub(crate) fn success(dispatched_via: &str, bbox: Option<Rect>) -> CallToolResul
         }),
         None => json!({ "ok": true, "dispatched_via": dispatched_via }),
     };
-    CallToolResult::success(vec![Content::text(body.to_string())])
+    CallToolResult::success(vec![ContentBlock::text(body.to_string())])
 }
 
 /// Build a `CallToolResult::error` with body
@@ -33,7 +33,7 @@ pub(crate) fn error(code: &str, message: &str, fallback: Option<Rect>) -> CallTo
         None => serde_json::Value::Null,
     };
     let body = json!({ "error": { "code": code, "message": message, "fallback": fb } });
-    CallToolResult::error(vec![Content::text(body.to_string())])
+    CallToolResult::error(vec![ContentBlock::text(body.to_string())])
 }
 
 #[cfg(test)]

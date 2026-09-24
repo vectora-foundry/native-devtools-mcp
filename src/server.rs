@@ -4,17 +4,19 @@ use crate::tools::{
     load_image, navigation, screenshot, screenshot_cache::ScreenshotCache,
 };
 use base64::Engine;
-use rmcp::model::Content;
+use rmcp::model::ContentBlock;
 use rmcp::{
     handler::server::ServerHandler,
     model::{
-        CallToolRequestParam, CallToolResult, ListToolsResult, PaginatedRequestParam,
-        ProtocolVersion, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+        CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+        ToolAnnotations,
     },
     service::{RequestContext, RoleServer},
-    Error as McpError,
+    ErrorData as McpError,
 };
 use serde_json::Value;
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -45,6 +47,9 @@ fn parse_xy(args: &Value) -> Result<(f64, f64), McpError> {
         .ok_or_else(|| McpError::invalid_params("missing required param: y", None))?;
     Ok((x, y))
 }
+
+/// MCP protocol version this server answers `initialize` with.
+const SERVER_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2024_11_05;
 
 fn json_to_object(value: Value) -> rmcp::model::JsonObject {
     match value {
@@ -187,7 +192,7 @@ impl MacOSDevToolsServer {
         let mut guard = self.android_device.write().await;
         match guard.as_mut() {
             Some(device) => f(device),
-            None => CallToolResult::error(vec![Content::text(
+            None => CallToolResult::error(vec![ContentBlock::text(
                 "No Android device connected. Use android_connect first.",
             )]),
         }
@@ -1890,7 +1895,7 @@ impl MacOSDevToolsServer {
 }
 
 impl ServerHandler for MacOSDevToolsServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut instructions = String::from(
             "Native DevTools MCP server for automating desktop apps (macOS/Windows) and Android devices.\n\n\
              WHICH TOOLS TO USE:\n\
@@ -1959,24 +1964,33 @@ impl ServerHandler for MacOSDevToolsServer {
              Use android_press_key with Android keycodes (e.g., 'KEYCODE_BACK', 'KEYCODE_HOME').",
         );
 
-        // `ServerInfo` and `Implementation` are `#[non_exhaustive]` in rmcp 1.x,
-        // so they can't be built with struct literals from outside the crate.
-        // Start from the defaults and override the fields we care about.
-        let mut info = ServerInfo::default();
-        info.protocol_version = ProtocolVersion::V_2024_11_05;
-        info.capabilities = ServerCapabilities::builder()
+        let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_tool_list_changed()
             .build();
-        info.server_info.name = "native-devtools-mcp".to_string();
-        info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
-        info.instructions = Some(instructions);
-        info
+        ServerConfig::new(capabilities)
+            .with_protocol_version(SERVER_PROTOCOL_VERSION)
+            .with_server_info(Implementation::new(
+                "native-devtools-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(instructions)
+    }
+
+    /// Advertise only the protocol version this server was built against.
+    ///
+    /// rmcp negotiates `initialize` against this list: a client asking for a
+    /// listed version gets it back, any other client gets the fallback from
+    /// `get_info` (the same version). So every client, old or new, is answered
+    /// with `2024-11-05`, which matches what older rmcp releases did with the
+    /// pinned version.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(&SERVER_PROTOCOL_VERSION))
     }
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let connected = self.is_connected().await;
@@ -1999,7 +2013,21 @@ impl ServerHandler for MacOSDevToolsServer {
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        self.dispatch_tool_call(request, context)
+            .await
+            .map(CallToolResponse::from)
+    }
+}
+
+impl MacOSDevToolsServer {
+    /// Run one `tools/call` request. Every tool completes in a single round
+    /// trip, so the result is always a plain `CallToolResult`.
+    async fn dispatch_tool_call(
+        &self,
+        request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = request
@@ -2172,19 +2200,23 @@ impl ServerHandler for MacOSDevToolsServer {
                         match crate::macos::ax::collect_ax_tree_indexed(params.app_name.as_deref())
                         {
                             Ok(v) => v,
-                            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                            Err(e) => {
+                                return Ok(CallToolResult::error(vec![ContentBlock::text(e)]))
+                            }
                         };
                     let generation = self.ax_session.create_snapshot(refs).await;
                     let snapshot =
                         crate::tools::ax_snapshot::format_snapshot(&nodes, Some(generation));
-                    Ok(CallToolResult::success(vec![Content::text(snapshot)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(snapshot)]))
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
                     // Windows UIA path: unchanged — no session, uids stay bare `a<N>`.
                     match crate::tools::ax_snapshot::take_ax_snapshot(params) {
-                        Ok(snapshot) => Ok(CallToolResult::success(vec![Content::text(snapshot)])),
-                        Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                        Ok(snapshot) => {
+                            Ok(CallToolResult::success(vec![ContentBlock::text(snapshot)]))
+                        }
+                        Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
                     }
                 }
             }
@@ -2214,10 +2246,10 @@ impl ServerHandler for MacOSDevToolsServer {
             }
             // Android tools
             "android_list_devices" => match crate::android::device::list_devices() {
-                Ok(devices) => Ok(CallToolResult::success(vec![Content::text(
+                Ok(devices) => Ok(CallToolResult::success(vec![ContentBlock::text(
                     to_json_pretty(&devices),
                 )])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
             },
             "android_connect" => {
                 let serial = parse_string_field(&args, "serial")?;
@@ -2229,19 +2261,19 @@ impl ServerHandler for MacOSDevToolsServer {
                         );
                         *self.android_device.write().await = Some(device);
                         let _ = context.peer.notify_tool_list_changed().await;
-                        Ok(CallToolResult::success(vec![Content::text(msg)]))
+                        Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
                     }
-                    Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                    Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
                 }
             }
             "android_disconnect" => {
                 if self.android_device.write().await.take().is_some() {
                     let _ = context.peer.notify_tool_list_changed().await;
-                    Ok(CallToolResult::success(vec![Content::text(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
                         "Disconnected from Android device. Android tools (android_*) are no longer available.",
                     )]))
                 } else {
-                    Ok(CallToolResult::error(vec![Content::text(
+                    Ok(CallToolResult::error(vec![ContentBlock::text(
                         "No Android device connected.",
                     )]))
                 }
@@ -2255,15 +2287,17 @@ impl ServerHandler for MacOSDevToolsServer {
                     .with_android_device(|device| {
                         let shot = match crate::android::screenshot::capture(device) {
                             Ok(s) => s,
-                            Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
                         };
                         if let Some(ref path) = file_path {
                             return match std::fs::write(path, &shot.png_data) {
-                                Ok(()) => CallToolResult::success(vec![Content::text(format!(
-                                    "Screenshot saved to {} ({}x{})",
-                                    path, shot.width, shot.height
-                                ))]),
-                                Err(e) => CallToolResult::error(vec![Content::text(format!(
+                                Ok(()) => {
+                                    CallToolResult::success(vec![ContentBlock::text(format!(
+                                        "Screenshot saved to {} ({}x{})",
+                                        path, shot.width, shot.height
+                                    ))])
+                                }
+                                Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
                                     "Failed to save screenshot: {}",
                                     e
                                 ))]),
@@ -2279,8 +2313,8 @@ impl ServerHandler for MacOSDevToolsServer {
                         };
                         let base64_data =
                             base64::engine::general_purpose::STANDARD.encode(&image_data);
-                        let mut contents = vec![Content::image(base64_data, mime_type)];
-                        contents.push(Content::text(to_json_pretty(&serde_json::json!({
+                        let mut contents = vec![ContentBlock::image(base64_data, mime_type)];
+                        contents.push(ContentBlock::text(to_json_pretty(&serde_json::json!({
                             "width": shot.width,
                             "height": shot.height,
                             "scale": 1.0,
@@ -2295,11 +2329,11 @@ impl ServerHandler for MacOSDevToolsServer {
                 Ok(self
                     .with_android_device(|device| {
                         match crate::android::input::click(device, x, y) {
-                            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+                            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                                 "Tapped at ({:.0}, {:.0})",
                                 x, y
                             ))]),
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2325,11 +2359,11 @@ impl ServerHandler for MacOSDevToolsServer {
                             p.end_y,
                             p.duration_ms,
                         ) {
-                            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+                            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                                 "Swiped from ({:.0}, {:.0}) to ({:.0}, {:.0})",
                                 p.start_x, p.start_y, p.end_x, p.end_y
                             ))]),
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2340,11 +2374,11 @@ impl ServerHandler for MacOSDevToolsServer {
                 Ok(self
                     .with_android_device(|device| {
                         match crate::android::input::type_text(device, &text) {
-                            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+                            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                                 "Typed {} characters",
                                 len
                             ))]),
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2354,11 +2388,11 @@ impl ServerHandler for MacOSDevToolsServer {
                 Ok(self
                     .with_android_device(|device| {
                         match crate::android::input::press_key(device, &key) {
-                            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+                            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                                 "Pressed key: {}",
                                 key
                             ))]),
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2370,9 +2404,9 @@ impl ServerHandler for MacOSDevToolsServer {
                         match crate::android::ui_automator::find_text(device, &text) {
                             Ok(result) => {
                                 let mut content =
-                                    vec![Content::text(to_json_pretty(&result.matches))];
+                                    vec![ContentBlock::text(to_json_pretty(&result.matches))];
                                 if result.matches.is_empty() {
-                                    content.push(Content::text(
+                                    content.push(ContentBlock::text(
                                         input_tools::build_no_matches_hint(
                                             &text,
                                             &result.available_elements,
@@ -2381,7 +2415,7 @@ impl ServerHandler for MacOSDevToolsServer {
                                 }
                                 CallToolResult::success(content)
                             }
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2394,10 +2428,10 @@ impl ServerHandler for MacOSDevToolsServer {
                 Ok(self
                     .with_android_device(|device| {
                         match crate::android::navigation::list_apps(device, user_apps_only) {
-                            Ok(apps) => {
-                                CallToolResult::success(vec![Content::text(to_json_pretty(&apps))])
-                            }
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Ok(apps) => CallToolResult::success(vec![ContentBlock::text(
+                                to_json_pretty(&apps),
+                            )]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2407,11 +2441,11 @@ impl ServerHandler for MacOSDevToolsServer {
                 Ok(self
                     .with_android_device(|device| {
                         match crate::android::navigation::launch_app(device, &package_name) {
-                            Ok(()) => CallToolResult::success(vec![Content::text(format!(
+                            Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
                                 "Launched {}",
                                 package_name
                             ))]),
-                            Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                            Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                         }
                     })
                     .await)
@@ -2420,19 +2454,19 @@ impl ServerHandler for MacOSDevToolsServer {
                 .with_android_device(|device| {
                     match crate::android::navigation::get_display_info(device) {
                         Ok(info) => {
-                            CallToolResult::success(vec![Content::text(to_json_pretty(&info))])
+                            CallToolResult::success(vec![ContentBlock::text(to_json_pretty(&info))])
                         }
-                        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                     }
                 })
                 .await),
             "android_get_current_activity" => Ok(self
                 .with_android_device(
                     |device| match crate::android::navigation::get_current_activity(device) {
-                        Ok(activity) => {
-                            CallToolResult::success(vec![Content::text(to_json_pretty(&activity))])
-                        }
-                        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+                        Ok(activity) => CallToolResult::success(vec![ContentBlock::text(
+                            to_json_pretty(&activity),
+                        )]),
+                        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
                     },
                 )
                 .await),
@@ -2447,7 +2481,7 @@ impl ServerHandler for MacOSDevToolsServer {
                     }
                 };
                 if already_active {
-                    return Ok(CallToolResult::error(vec![Content::text(
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
                         "Hover tracking is already active. Use stop_hover_tracking to end the current session first.",
                     )]));
                 }
@@ -2500,7 +2534,7 @@ impl ServerHandler for MacOSDevToolsServer {
                     min_dwell_ms,
                     app_name.map_or(String::new(), |a| format!(", app: {}", a)),
                 );
-                Ok(CallToolResult::success(vec![Content::text(msg)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
             }
             "get_hover_events" => {
                 // Single lock: check auto-stop and drain events together
@@ -2525,9 +2559,9 @@ impl ServerHandler for MacOSDevToolsServer {
                         // Always return the JSON array for consistent parsing.
                         // The timeout sentinel event (with timeout: true) signals
                         // auto-stop within the event stream itself.
-                        Ok(CallToolResult::success(vec![Content::text(json)]))
+                        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                     }
-                    None => Ok(CallToolResult::error(vec![Content::text(
+                    None => Ok(CallToolResult::error(vec![ContentBlock::text(
                         "No hover tracking session is active. Use start_hover_tracking first.",
                     )])),
                 }
@@ -2539,11 +2573,11 @@ impl ServerHandler for MacOSDevToolsServer {
                         let events = tracker.cancel_and_drain().await;
                         let _ = context.peer.notify_tool_list_changed().await;
                         // Return raw JSON array for consistent parsing with get_hover_events
-                        Ok(CallToolResult::success(vec![Content::text(
+                        Ok(CallToolResult::success(vec![ContentBlock::text(
                             to_json_pretty(&events),
                         )]))
                     }
-                    None => Ok(CallToolResult::error(vec![Content::text(
+                    None => Ok(CallToolResult::error(vec![ContentBlock::text(
                         "No hover tracking session is active.",
                     )])),
                 }
@@ -2566,7 +2600,7 @@ impl ServerHandler for MacOSDevToolsServer {
                             self.screen_recorder.write().await.take();
                             let _ = context.peer.notify_tool_list_changed().await;
                         } else {
-                            return Ok(CallToolResult::error(vec![Content::text(
+                            return Ok(CallToolResult::error(vec![ContentBlock::text(
                                 "Recording is already active. Use stop_recording to end the current session first.",
                             )]));
                         }
@@ -2583,7 +2617,7 @@ impl ServerHandler for MacOSDevToolsServer {
 
                 let output_path = std::path::PathBuf::from(&output_dir);
                 if let Err(e) = std::fs::create_dir_all(&output_path) {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "Failed to create output directory: {e}"
                     ))]));
                 }
@@ -2591,7 +2625,7 @@ impl ServerHandler for MacOSDevToolsServer {
                 match tempfile::tempfile_in(&output_path) {
                     Ok(_) => {} // drops and deletes automatically
                     Err(e) => {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                        return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                             "Output directory is not writable: {e}"
                         ))]));
                     }
@@ -2613,7 +2647,7 @@ impl ServerHandler for MacOSDevToolsServer {
                 *self.screen_recorder.write().await = Some(recorder);
                 let _ = context.peer.notify_tool_list_changed().await;
 
-                Ok(CallToolResult::success(vec![Content::text(format!(
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Recording started ({fps}fps, max: {max_duration_ms}ms, dir: {output_dir}). Use stop_recording to end.",
                 ))]))
             }
@@ -2623,11 +2657,11 @@ impl ServerHandler for MacOSDevToolsServer {
                     Some(recorder) => {
                         let frames = recorder.cancel_and_drain().await;
                         let _ = context.peer.notify_tool_list_changed().await;
-                        Ok(CallToolResult::success(vec![Content::text(
+                        Ok(CallToolResult::success(vec![ContentBlock::text(
                             to_json_pretty(&frames),
                         )]))
                     }
-                    None => Ok(CallToolResult::error(vec![Content::text(
+                    None => Ok(CallToolResult::error(vec![ContentBlock::text(
                         "No recording session is active.",
                     )])),
                 }
@@ -2638,7 +2672,7 @@ impl ServerHandler for MacOSDevToolsServer {
                     McpError::invalid_params("missing required param: port", None)
                 })?;
                 if port_num > 65535 {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                         "Invalid port: {}. Port must be 0-65535.",
                         port_num
                     ))]));
@@ -2655,12 +2689,12 @@ impl ServerHandler for MacOSDevToolsServer {
                         *self.cdp_client.write().await = Some(client);
                         // Tool list does not change on CDP connect/disconnect — CDP
                         // tools are always listed so prompt caches remain stable.
-                        Ok(CallToolResult::success(vec![Content::text(format!(
+                        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                             "Connected to Chrome/Electron on port {}. CDP tool calls will now succeed.\n{}",
                             port, page_info
                         ))]))
                     }
-                    Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                    Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e)])),
                 }
             }
             #[cfg(feature = "cdp")]
@@ -2670,13 +2704,13 @@ impl ServerHandler for MacOSDevToolsServer {
                     // Tool list is unchanged on disconnect — CDP tools remain
                     // listed and will return "not connected" errors until
                     // cdp_connect succeeds again.
-                    Ok(CallToolResult::success(vec![Content::text(
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
                         "Disconnected from Chrome/Electron. CDP tool calls will return a 'not connected' error until cdp_connect is called again.",
                     )]))
                 } else {
                     // Use the canonical "not connected" message shared by every
                     // CDP tool handler so clients see one stable error shape.
-                    Ok(CallToolResult::error(vec![Content::text(
+                    Ok(CallToolResult::error(vec![ContentBlock::text(
                         "No CDP connection. Use cdp_connect first.",
                     )]))
                 }

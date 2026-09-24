@@ -1,6 +1,6 @@
 use crate::platform;
 use crate::tools::probe_app::{classify_running_app, AppKind};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -13,18 +13,18 @@ pub fn list_windows(params: ListWindowsParams) -> CallToolResult {
     let windows = if let Some(app_name) = params.app_name {
         match platform::find_windows_by_app(&app_name) {
             Ok(w) => w,
-            Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
         }
     } else {
         match platform::list_windows() {
             Ok(w) => w,
-            Err(e) => return CallToolResult::error(vec![Content::text(e)]),
+            Err(e) => return CallToolResult::error(vec![ContentBlock::text(e)]),
         }
     };
 
     match serde_json::to_string_pretty(&windows) {
-        Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
+        Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
             "Failed to serialize windows: {}",
             e
         ))]),
@@ -52,8 +52,8 @@ pub fn list_apps(params: ListAppsParams) -> CallToolResult {
     }
 
     match serde_json::to_string_pretty(&apps) {
-        Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
+        Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
             "Failed to serialize apps: {}",
             e
         ))]),
@@ -77,18 +77,18 @@ pub fn launch_app(params: LaunchAppParams) -> CallToolResult {
 
     // If args are provided, check if the app is already running — args only apply on fresh launch
     if !args.is_empty() && platform::is_app_running(&params.app_name) {
-        return CallToolResult::error(vec![Content::text(format!(
+        return CallToolResult::error(vec![ContentBlock::text(format!(
             "'{}' is already running. CLI args only apply on fresh launch. Use quit_app to quit it first, then retry.",
             params.app_name
         ))]);
     }
 
     match platform::launch_app(&params.app_name, args, background) {
-        Ok(()) => CallToolResult::success(vec![Content::text(format!(
+        Ok(()) => CallToolResult::success(vec![ContentBlock::text(format!(
             "Launched '{}'",
             params.app_name
         ))]),
-        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
     }
 }
 
@@ -105,7 +105,7 @@ pub fn quit_app(params: QuitAppParams) -> CallToolResult {
     match platform::quit_app(&params.app_name, force) {
         Ok(count) => {
             let method = if force { "Force-killed" } else { "Quit" };
-            CallToolResult::success(vec![Content::text(format!(
+            CallToolResult::success(vec![ContentBlock::text(format!(
                 "{} '{}' ({} instance{})",
                 method,
                 params.app_name,
@@ -113,7 +113,7 @@ pub fn quit_app(params: QuitAppParams) -> CallToolResult {
                 if count == 1 { "" } else { "s" }
             ))])
         }
-        Err(e) => CallToolResult::error(vec![Content::text(e)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(e)]),
     }
 }
 
@@ -153,8 +153,8 @@ pub struct FocusWindowResult {
 
 fn focused(result: FocusWindowResult) -> CallToolResult {
     match serde_json::to_string(&result) {
-        Ok(json) => CallToolResult::success(vec![Content::text(json)]),
-        Err(e) => CallToolResult::error(vec![Content::text(format!(
+        Ok(json) => CallToolResult::success(vec![ContentBlock::text(json)]),
+        Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
             "Failed to serialize focus_window result: {}",
             e
         ))]),
@@ -162,7 +162,7 @@ fn focused(result: FocusWindowResult) -> CallToolResult {
 }
 
 fn error(msg: impl Into<String>) -> CallToolResult {
-    CallToolResult::error(vec![Content::text(msg.into())])
+    CallToolResult::error(vec![ContentBlock::text(msg.into())])
 }
 
 /// Build the structured result for a successfully focused PID by

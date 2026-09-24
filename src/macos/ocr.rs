@@ -1,5 +1,9 @@
 //! OCR functionality using Apple Vision for text detection on screen.
 
+// This module still uses the deprecated `cocoa` crate (superseded by `objc2`)
+// and `image::io::Reader`.
+#![allow(deprecated)]
+
 use super::display;
 use cocoa::base::nil;
 use cocoa::foundation::NSAutoreleasePool;

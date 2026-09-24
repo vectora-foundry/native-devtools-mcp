@@ -5,7 +5,7 @@ use chromiumoxide::cdp::browser_protocol::page::{
     GetNavigationHistoryParams, HandleJavaScriptDialogParams, NavigateParams,
     NavigateToHistoryEntryParams, ReloadParams,
 };
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -50,7 +50,7 @@ pub async fn cdp_list_pages(cdp_client: Arc<RwLock<Option<CdpClient>>>) -> CallT
 
     client.last_page_list = filtered;
 
-    CallToolResult::success(vec![Content::text(output.trim_end().to_string())])
+    CallToolResult::success(vec![ContentBlock::text(output.trim_end().to_string())])
 }
 
 pub async fn cdp_select_page(
@@ -91,7 +91,7 @@ pub async fn cdp_select_page(
         client.invalidate_snapshots();
     }
 
-    CallToolResult::success(vec![Content::text(format!(
+    CallToolResult::success(vec![ContentBlock::text(format!(
         "Selected page [{}]: {}",
         page_idx, url
     ))])
@@ -136,7 +136,7 @@ pub async fn cdp_handle_dialog(
     params.prompt_text = prompt_text;
 
     match page.execute(params).await {
-        Ok(_) => CallToolResult::success(vec![Content::text(format!(
+        Ok(_) => CallToolResult::success(vec![ContentBlock::text(format!(
             "Dialog {}ed{}",
             action, detail
         ))]),
@@ -194,7 +194,7 @@ pub async fn cdp_navigate(
                         ));
                     }
                     client.invalidate_snapshots();
-                    CallToolResult::success(vec![Content::text(format!(
+                    CallToolResult::success(vec![ContentBlock::text(format!(
                         "Navigated to {}",
                         target_url
                     ))])
@@ -204,7 +204,7 @@ pub async fn cdp_navigate(
                     // Timed out waiting for load event — navigation was sent,
                     // page is likely still loading or already loaded.
                     client.invalidate_snapshots();
-                    CallToolResult::success(vec![Content::text(format!(
+                    CallToolResult::success(vec![ContentBlock::text(format!(
                         "Navigated to {} (page may still be loading)",
                         target_url
                     ))])
@@ -214,7 +214,7 @@ pub async fn cdp_navigate(
         "reload" => match page.execute(ReloadParams::default()).await {
             Ok(_) => {
                 client.invalidate_snapshots();
-                CallToolResult::success(vec![Content::text("Page reloaded")])
+                CallToolResult::success(vec![ContentBlock::text("Page reloaded")])
             }
             Err(e) => cdp_error(format!("Reload failed: {}", e)),
         },
@@ -244,7 +244,7 @@ pub async fn cdp_navigate(
             {
                 Ok(_) => {
                     client.invalidate_snapshots();
-                    CallToolResult::success(vec![Content::text(format!(
+                    CallToolResult::success(vec![ContentBlock::text(format!(
                         "Navigated {}: {}",
                         action, entry_url
                     ))])
@@ -278,7 +278,7 @@ pub async fn cdp_new_page(
     client.selected_page = Some(page);
     client.invalidate_snapshots();
 
-    CallToolResult::success(vec![Content::text(format!(
+    CallToolResult::success(vec![ContentBlock::text(format!(
         "Created and selected new page: {}",
         page_url
     ))])
@@ -350,7 +350,7 @@ pub async fn cdp_close_page(
         }
     }
 
-    CallToolResult::success(vec![Content::text(format!(
+    CallToolResult::success(vec![ContentBlock::text(format!(
         "Closed page [{}]: {}",
         page_idx, url
     ))])
