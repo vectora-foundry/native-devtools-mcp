@@ -3,6 +3,7 @@
 //! Uses the macOS Accessibility tree for:
 //! - Text search: find UI elements by name (faster than OCR for standard controls)
 //! - Window raising: bring windows to front via AXRaise (works for bundle-less apps)
+//! - Single-window raising: map a `CGWindowID` to its AX window and raise only that one
 
 use super::ocr::{TextBounds, TextMatch};
 use crate::tools::ax_snapshot::{map_ax_role, AXSnapshotNode};
@@ -62,6 +63,10 @@ extern "C" {
         element: *mut AXUIElementRef,
     ) -> i32;
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
+    /// Private but long-stable HIServices SPI that returns the `CGWindowID`
+    /// backing an AX window element. There is no public API for this
+    /// mapping; window managers and automation tools rely on it widely.
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
 }
 
 /// Retained, thread-safe handle to an `AXUIElement`.
@@ -892,6 +897,196 @@ pub fn raise_windows(pid: i32) -> bool {
     }
 }
 
+/// Max per-edge difference (points) for a CG frame and an AX frame to count
+/// as the same window. Both use the same global, top-left-origin space, but
+/// values can differ by rounding.
+const WINDOW_FRAME_TOLERANCE: f64 = 1.0;
+
+/// What we know about one entry of an app's `AXWindows` list.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AxWindowDescriptor {
+    /// `CGWindowID` from `_AXUIElementGetWindow`, when that call succeeded.
+    pub cg_window_id: Option<u32>,
+    /// `AXTitle` of the window.
+    pub title: Option<String>,
+    /// `(x, y, width, height)` from `AXPosition` + `AXSize`.
+    pub frame: Option<(f64, f64, f64, f64)>,
+}
+
+/// The window the caller asked for, as seen by the window server.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TargetWindow<'a> {
+    pub cg_window_id: u32,
+    /// `kCGWindowName`. Often `None` without Screen Recording permission.
+    pub title: Option<&'a str>,
+    pub frame: (f64, f64, f64, f64),
+}
+
+fn frames_match(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    (a.0 - b.0).abs() <= WINDOW_FRAME_TOLERANCE
+        && (a.1 - b.1).abs() <= WINDOW_FRAME_TOLERANCE
+        && (a.2 - b.2).abs() <= WINDOW_FRAME_TOLERANCE
+        && (a.3 - b.3).abs() <= WINDOW_FRAME_TOLERANCE
+}
+
+/// Pick the AX window that corresponds to `target`.
+///
+/// 1. An exact `CGWindowID` match wins.
+/// 2. Otherwise, only candidates whose ID is unknown are considered (a known,
+///    different ID is a different window). A candidate matches when its
+///    frame equals the target frame (within tolerance) and, when both titles
+///    are known, the titles are equal.
+/// 3. The fallback must be unambiguous: more than one match returns `None`.
+pub(crate) fn select_ax_window(
+    target: &TargetWindow<'_>,
+    candidates: &[AxWindowDescriptor],
+) -> Option<usize> {
+    if let Some(index) = candidates
+        .iter()
+        .position(|c| c.cg_window_id == Some(target.cg_window_id))
+    {
+        return Some(index);
+    }
+
+    let mut matches = candidates.iter().enumerate().filter(|(_, c)| {
+        c.cg_window_id.is_none()
+            && c.frame.is_some_and(|f| frames_match(f, target.frame))
+            && match (target.title, c.title.as_deref()) {
+                (Some(want), Some(have)) => want == have,
+                _ => true,
+            }
+    });
+
+    let first = matches.next().map(|(index, _)| index);
+    if matches.next().is_some() {
+        None
+    } else {
+        first
+    }
+}
+
+/// Raise exactly one window, identified by its `CGWindowID`, to the front.
+///
+/// Sets `AXFrontmost` on the owning app, finds the AX window that backs
+/// `window.id` (see [`select_ax_window`]), then performs `AXRaise` on it and
+/// makes it the app's main and focused window.
+///
+/// Returns `true` only when the requested window was found and `AXRaise`
+/// succeeded. Returns `false` when the window has no matching AX element;
+/// the caller decides how to fall back.
+pub fn raise_window(window: &super::window::WindowInfo) -> bool {
+    let debug = std::env::var("NATIVE_DEVTOOLS_DEBUG").is_ok();
+    let pid = window.owner_pid as i32;
+
+    unsafe {
+        let app_element = AXUIElementCreateApplication(pid);
+        if app_element.is_null() {
+            if debug {
+                eprintln!(
+                    "[DEBUG ax::raise_window] Failed to create AXUIElement for pid {}",
+                    pid
+                );
+            }
+            return false;
+        }
+        // Own the app element so every return path releases it.
+        let app_element = AXRef::from_create(app_element);
+        let app_raw = app_element.as_raw();
+
+        let frontmost_attr = CFString::new("AXFrontmost");
+        let frontmost_err = AXUIElementSetAttributeValue(
+            app_raw,
+            frontmost_attr.as_concrete_TypeRef(),
+            CFBoolean::true_value().as_CFTypeRef(),
+        );
+
+        let windows_attr = CFString::new("AXWindows");
+        let mut windows_ref: core_foundation::base::CFTypeRef = ptr::null();
+        let err = AXUIElementCopyAttributeValue(
+            app_raw,
+            windows_attr.as_concrete_TypeRef(),
+            &mut windows_ref,
+        );
+        if err != K_AX_ERROR_SUCCESS || windows_ref.is_null() {
+            if debug {
+                eprintln!(
+                    "[DEBUG ax::raise_window] No AXWindows for pid {} (err={})",
+                    pid, err
+                );
+            }
+            return false;
+        }
+        // AXUIElementCopyAttributeValue follows the create rule.
+        let windows: CFArray<*const c_void> = CFArray::wrap_under_create_rule(windows_ref as _);
+
+        let descriptors: Vec<AxWindowDescriptor> = windows
+            .iter()
+            .map(|item| {
+                let element = *item as AXUIElementRef;
+                let mut cg_window_id: u32 = 0;
+                let cg_window_id = (_AXUIElementGetWindow(element, &mut cg_window_id)
+                    == K_AX_ERROR_SUCCESS
+                    && cg_window_id != 0)
+                    .then_some(cg_window_id);
+                AxWindowDescriptor {
+                    cg_window_id,
+                    title: get_string_attribute(element, "AXTitle"),
+                    frame: get_position_and_size(element)
+                        .map(|(p, s)| (p.x, p.y, s.width, s.height)),
+                }
+            })
+            .collect();
+
+        let bounds = &window.bounds;
+        let target = TargetWindow {
+            cg_window_id: window.id,
+            title: window.name.as_deref(),
+            frame: (bounds.x, bounds.y, bounds.width, bounds.height),
+        };
+
+        let Some(index) = select_ax_window(&target, &descriptors) else {
+            if debug {
+                eprintln!(
+                    "[DEBUG ax::raise_window] No AX window matches window {} (pid={}, candidates={:?})",
+                    window.id, pid, descriptors
+                );
+            }
+            return false;
+        };
+
+        // Elements inside the array are borrowed (get rule); `windows` keeps
+        // them alive until the end of this scope.
+        let target_element = *windows.get_unchecked(index as isize) as AXUIElementRef;
+
+        let raise_action = CFString::new("AXRaise");
+        let raise_err =
+            AXUIElementPerformAction(target_element, raise_action.as_concrete_TypeRef());
+
+        let main_attr = CFString::new("AXMain");
+        let main_err = AXUIElementSetAttributeValue(
+            target_element,
+            main_attr.as_concrete_TypeRef(),
+            CFBoolean::true_value().as_CFTypeRef(),
+        );
+
+        let focused_attr = CFString::new("AXFocusedWindow");
+        let focused_err = AXUIElementSetAttributeValue(
+            app_raw,
+            focused_attr.as_concrete_TypeRef(),
+            target_element as core_foundation::base::CFTypeRef,
+        );
+
+        if debug {
+            eprintln!(
+                "[DEBUG ax::raise_window] window={} pid={} index={} frontmost_err={} raise_err={} main_err={} focused_err={}",
+                window.id, pid, index, frontmost_err, raise_err, main_err, focused_err
+            );
+        }
+
+        raise_err == K_AX_ERROR_SUCCESS
+    }
+}
+
 /// Recursively walk the AX element tree and collect [`AXSnapshotNode`] entries
 /// plus a `HashMap<uid, AXRef>` of retained handles.
 ///
@@ -1244,5 +1439,100 @@ mod tests {
             after_get_drop, before_get,
             "from_get + drop must be net-zero"
         );
+    }
+}
+
+#[cfg(test)]
+mod select_ax_window_tests {
+    use super::{select_ax_window, AxWindowDescriptor, TargetWindow};
+
+    fn candidate(
+        cg_window_id: Option<u32>,
+        title: Option<&str>,
+        frame: Option<(f64, f64, f64, f64)>,
+    ) -> AxWindowDescriptor {
+        AxWindowDescriptor {
+            cg_window_id,
+            title: title.map(str::to_string),
+            frame,
+        }
+    }
+
+    fn target(title: Option<&str>) -> TargetWindow<'_> {
+        TargetWindow {
+            cg_window_id: 42,
+            title,
+            frame: (100.0, 200.0, 800.0, 600.0),
+        }
+    }
+
+    #[test]
+    fn picks_the_window_whose_cg_id_matches_even_when_it_is_not_last() {
+        let candidates = [
+            candidate(Some(41), Some("A"), Some((0.0, 0.0, 10.0, 10.0))),
+            candidate(Some(42), Some("B"), Some((0.0, 0.0, 10.0, 10.0))),
+            candidate(Some(43), Some("C"), Some((0.0, 0.0, 10.0, 10.0))),
+        ];
+        assert_eq!(select_ax_window(&target(None), &candidates), Some(1));
+    }
+
+    #[test]
+    fn id_match_wins_over_a_frame_and_title_match() {
+        let candidates = [
+            candidate(None, Some("Doc"), Some((100.0, 200.0, 800.0, 600.0))),
+            candidate(Some(42), Some("Other"), Some((5.0, 5.0, 5.0, 5.0))),
+        ];
+        assert_eq!(select_ax_window(&target(Some("Doc")), &candidates), Some(1));
+    }
+
+    #[test]
+    fn returns_none_when_every_candidate_has_a_different_known_id() {
+        let candidates = [
+            candidate(Some(7), Some("Doc"), Some((100.0, 200.0, 800.0, 600.0))),
+            candidate(Some(8), None, Some((100.0, 200.0, 800.0, 600.0))),
+        ];
+        assert_eq!(select_ax_window(&target(Some("Doc")), &candidates), None);
+    }
+
+    #[test]
+    fn falls_back_to_frame_within_tolerance_when_ids_are_unknown() {
+        let candidates = [
+            candidate(None, Some("Doc"), Some((0.0, 0.0, 800.0, 600.0))),
+            candidate(None, Some("Doc"), Some((100.5, 199.5, 800.0, 600.9))),
+        ];
+        assert_eq!(select_ax_window(&target(None), &candidates), Some(1));
+    }
+
+    #[test]
+    fn frame_fallback_rejects_a_frame_outside_tolerance() {
+        let candidates = [candidate(None, None, Some((102.0, 200.0, 800.0, 600.0)))];
+        assert_eq!(select_ax_window(&target(None), &candidates), None);
+    }
+
+    #[test]
+    fn frame_fallback_uses_title_to_break_a_tie() {
+        let candidates = [
+            candidate(None, Some("First"), Some((100.0, 200.0, 800.0, 600.0))),
+            candidate(None, Some("Second"), Some((100.0, 200.0, 800.0, 600.0))),
+        ];
+        assert_eq!(
+            select_ax_window(&target(Some("Second")), &candidates),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn frame_fallback_returns_none_when_ambiguous() {
+        let candidates = [
+            candidate(None, Some("First"), Some((100.0, 200.0, 800.0, 600.0))),
+            candidate(None, Some("Second"), Some((100.0, 200.0, 800.0, 600.0))),
+        ];
+        assert_eq!(select_ax_window(&target(None), &candidates), None);
+    }
+
+    #[test]
+    fn frame_fallback_skips_candidates_without_a_frame() {
+        let candidates = [candidate(None, Some("Doc"), None)];
+        assert_eq!(select_ax_window(&target(Some("Doc")), &candidates), None);
     }
 }

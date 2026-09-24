@@ -1,6 +1,6 @@
 {
   "name": "@sh3ll3x3c/native-devtools-mcp-darwin-arm64",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "native-devtools-mcp binary for macOS ARM64",
   "license": "MIT",
   "repository": {

@@ -512,6 +512,17 @@ pub fn raise_windows(_pid: i32) -> bool {
     true
 }
 
+/// Bring one specific window (by its HWND-based ID) to the foreground.
+///
+/// Returns `true` when the window is the foreground window afterwards.
+/// `SetForegroundWindow` can be refused by focus-stealing prevention, so
+/// the caller must not assume success.
+pub fn raise_window(window: &super::window::WindowInfo) -> bool {
+    let hwnd = super::window::hwnd_from_id(window.id);
+    focus_hwnd(hwnd);
+    unsafe { GetForegroundWindow() == hwnd }
+}
+
 /// Focus a window by its handle.
 ///
 /// Uses multiple techniques to bring a window to the foreground since

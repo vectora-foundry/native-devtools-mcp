@@ -49,6 +49,8 @@ Use this table to choose the right tool sequence for the user's goal.
 | "Wait for page content" | `cdp_wait_for(text=["Success"])` | Polls page text until any value appears or timeout. Pass `include_snapshot=true` to also get a DOM snapshot. |
 | "Switch browser tabs" | `cdp_list_pages()` → `cdp_select_page(page_idx=1)` | List tabs, then select by index. |
 | "Get browser page structure" | `cdp_take_dom_snapshot()` | Full interactive-element DOM snapshot with UIDs, roles, and labels. |
+| "Is this app native, Electron, or Chrome?" | `probe_app(app_name="Signal")` | Decides between native tools (`take_ax_snapshot`, `click`, `find_text`) and CDP tools. Works whether the app is running or not. |
+| "Wait for a new message in a web/Electron app" | `cdp_find_elements(query="Messages")` → `cdp_wait_for_page_change(scope_uid="d3")` | Blocks until the scoped element's visible text changes; returns compact before/after deltas. |
 
 ---
 
@@ -123,6 +125,9 @@ Inspect the accessibility element at given screen coordinates.
     *   **Windows:** Uses `IUIAutomation::ElementFromPoint`. `app_name` is not yet supported (ignored).
 *   **Known limitation:** Some privacy-focused Electron apps (e.g. Signal) intentionally restrict their accessibility tree, exposing only top-level containers without individual UI elements. In these cases, `element_at_point` returns the outermost container (e.g. AXScrollArea or AXWindow). **Workaround:** If the returned element is a large container, use `take_screenshot(app_name=..., include_ocr=true)` and check the OCR results to identify the text/element at those coordinates.
 
+#### `get_displays`
+Returns all connected displays with bounds, scale factors, and resolution. No inputs.
+
 ### 2. Input & Interaction (The "Hands")
 
 #### `click`
@@ -133,6 +138,18 @@ Simulates a mouse click.
     *   **Method C (Screenshot Relative):** `screenshot_x`, `screenshot_y`, `screenshot_origin_x`, `screenshot_origin_y`, `screenshot_scale`. Use with `take_screenshot` visual analysis.
     *   `button`: "left" (default), "right", "center".
     *   `click_count`: 1 (default), 2 (double-click).
+
+#### `move_mouse`
+Moves the cursor to screen coordinates without clicking.
+*   **Inputs:** `x` (number), `y` (number).
+
+#### `drag`
+Drags from one point to another.
+*   **Inputs:** `start_x`, `start_y`, `end_x`, `end_y` (numbers, screen coordinates), `button` (optional: `"left"` default, `"right"`, `"center"`).
+
+#### `press_key`
+Presses a key combination in the focused app.
+*   **Inputs:** `key` (string, e.g. `"return"`, `"tab"`, `"escape"`, `"a"`, `"f1"`, `"left"`), `modifiers` (array, optional: `"shift"`, `"control"`, `"option"`, `"command"`).
 
 #### `type_text`
 Types text at the *current* cursor position.
@@ -197,6 +214,8 @@ Scrolls at a specific screen position.
 ### 3. Window Management
 
 *   `list_windows`: Returns array of `{ id, title, bounds, app_name }`.
+*   `list_apps`: List running apps with names, bundle IDs, and PIDs. Optional `app_name` (substring filter) and `user_apps_only` (excludes agents, helpers, daemons).
+*   `probe_app`: Classify an app as `Native`, `ElectronApp`, or `ChromeBrowser`. **Input:** `app_name` (string). Works whether the app is running or not. Use it to pick native tools or CDP tools.
 *   `focus_window`: Accepts `{ window_id: 123 }`, `{ app_name: "Code" }`, or `{ pid: 999 }`.
 *   `launch_app`: Launch an app by name. Optional `args` parameter for CLI arguments. If app is already running with no args, brings to front; with args, returns error (use `quit_app` first).
 *   `quit_app`: Quit a running app. Accepts `app_name` (required) and `force` (boolean, default false).
@@ -250,7 +269,9 @@ Connect to Chrome or Electron apps via Chrome DevTools Protocol for DOM-level el
 *   `cdp_connect(port)`: Connect to a Chrome/Electron debug port. Auto-selects the first page.
 *   `cdp_disconnect`: Disconnect the CDP client. The CDP tools stay listed; subsequent calls return a "not connected" error until `cdp_connect` is called again.
 *   `cdp_take_dom_snapshot(max_nodes?)`: Full DOM snapshot of interactive elements — returns UIDs prefixed `d` (e.g., d1, d2) with roles, labels, and parent context. Use when you need the complete page structure; for targeted lookups prefer `cdp_find_elements`. **Always take a fresh snapshot after any navigation or DOM change before resolving UIDs.**
+*   `cdp_summarize_page`: Compact page summary — URL, title, page generation, and interactive elements grouped by role with sample labels. Returns no UIDs and does not replace the current UID snapshot. Use for orientation before targeted `cdp_find_elements` queries.
 *   `cdp_find_elements(query, role?, max_results?)`: **Preferred discovery tool.** Search the live DOM for interactive elements matching a text query. Returns matches with `d`-prefixed UIDs plus a page-level inventory grouped by role — focused results without flooding context.
+*   `cdp_get_element_context(uid, ancestor_depth?, sibling_limit?, child_limit?, max_chars?)`: Expand a UID from the most recent `cdp_find_elements` / `cdp_take_dom_snapshot` call. Returns the stored match evidence, nearby matches, and bounded live DOM context (ancestors, siblings, children). Use when a search returns several plausible matches.
 *   `cdp_click(uid, dbl_click?)`: Click an element by UID. Scrolls into view automatically.
 *   `cdp_hover(uid)`: Hover over an element by UID.
 *   `cdp_fill(uid, value)`: Type text into an input/textarea or select an option from a `<select>`.
@@ -261,6 +282,7 @@ Connect to Chrome or Electron apps via Chrome DevTools Protocol for DOM-level el
 *   `cdp_new_page(url)`: Create a new tab and navigate to URL. Becomes the selected page.
 *   `cdp_close_page(page_idx)`: Close a tab by index. Cannot close the last page.
 *   `cdp_wait_for(text, timeout?, include_snapshot?)`: Wait for any value in `text` to appear on the page (polls `document.body.innerText`, default 10s timeout). Returns a one-line "text appeared after Xms" header by default; pass `include_snapshot=true` to also append a DOM snapshot.
+*   `cdp_wait_for_page_change(scope_uid?, condition?, goal?, timeout?, poll_interval_ms?, stable_ms?, include_snapshot?)`: Block until the page, or the element at `scope_uid`, has a semantic visible-text / editor-value change. Returns compact before/after deltas. Use for unknown incoming content (messages, replies, notifications). Prefer a stable container as `scope_uid`. Default and max timeout: 55s.
 *   `cdp_evaluate_script(function, args?)`: Evaluate JS in the page. No args: `() => document.title`. With element args: `(el) => el.innerText` + `args=[{uid: "d5"}]`.
 *   `cdp_list_pages`: List open tabs/windows with indices. Selected page marked with `*`.
 *   `cdp_select_page(page_idx)`: Switch to a tab/window by index.
@@ -308,7 +330,7 @@ Android tools use the `android_` prefix. Device management tools are always avai
 *   `android_disconnect`: Disconnect from the current device.
 
 #### Vision
-*   `android_screenshot`: Captures the device screen. Returns a PNG image + metadata `{ "device": "abc123", "width": 1080, "height": 2400, "scale": 1.0 }`.
+*   `android_screenshot`: Captures the device screen. Returns a JPEG image + metadata `{ "device": "abc123", "width": 1080, "height": 2400, "scale": 1.0 }`.
 *   `android_find_text`: Find UI elements by text (case-insensitive substring). Uses `uiautomator dump` to search the accessibility tree. **Input:** `text` (string). Returns `[{ "text": "OK", "x": 540, "y": 1200, "bounds": { "x": 480, "y": 1170, "width": 120, "height": 60 } }]`.
 
 #### Input
@@ -334,6 +356,24 @@ Android tools use the `android_` prefix. Device management tools are always avai
 ```
 
 **Note:** Android coordinates are absolute screen pixels (no scale conversion needed). Use `x`/`y` from `android_find_text` directly with `android_click`.
+
+### 8. AppDebugKit Apps
+
+For apps that embed AppDebugKit (a debug server reachable over WebSocket). `app_connect` is always listed; all other `app_*` tools appear after it connects.
+
+*   `app_connect(url, expected_bundle_id?, expected_app_name?)`: Connect to the app's debug server (e.g. `ws://127.0.0.1:9222`). Fails if the expected bundle ID or name does not match.
+*   `app_disconnect`: Disconnect from the debug server.
+*   `app_get_info`: Runtime info (name, bundle ID, version, etc.).
+*   `app_get_tree(depth?, root_id?)`: View hierarchy (default depth 5; `-1` for unlimited).
+*   `app_query(selector, all?)`: Find elements with a CSS-like selector (`#id`, `.ClassName`, `[prop=value]`).
+*   `app_get_element(element_id)`: Detailed info for one element.
+*   `app_click(element_id, click_count?)`: Click an element by ID.
+*   `app_type(text, element_id?, clear_first?)`: Type into an element (focused element if `element_id` is omitted).
+*   `app_press_key(key, modifiers?)`: Press a key or combination.
+*   `app_focus(element_id)`: Make an element first responder.
+*   `app_screenshot(element_id?)`: Screenshot an element, or the whole window if omitted.
+*   `app_list_windows`: List the app's windows.
+*   `app_focus_window(window_id)`: Make a window key and main.
 
 ---
 
