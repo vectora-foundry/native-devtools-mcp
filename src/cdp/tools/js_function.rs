@@ -224,15 +224,22 @@ const REGEX_PRECEDING_KEYWORDS: &[&str] = &[
 fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
     let chars: Vec<(usize, char)> = source.char_indices().collect();
     let mut out: Vec<(usize, char)> = Vec::new();
+    let mut state = RegexContext::default();
     // Brace depth at which each open template substitution `${` started.
     let mut template_stack: Vec<usize> = Vec::new();
     let mut brace_depth = 0usize;
     let mut word = String::new();
     let mut i = 0;
 
-    let emit = |out: &mut Vec<(usize, char)>, template_stack: &[usize], item: (usize, char)| {
-        // Code inside `${ ... }` belongs to the template literal.
-        if template_stack.is_empty() {
+    // Code inside `${ ... }` belongs to the template literal, so it is not
+    // part of the output. It still updates `state`, which decides whether a
+    // `/` inside the substitution starts a regex.
+    let emit = |out: &mut Vec<(usize, char)>,
+                state: &mut RegexContext,
+                in_template: bool,
+                item: (usize, char)| {
+        state.push(item.1);
+        if !in_template {
             out.push(item);
         }
     };
@@ -240,6 +247,7 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
     while i < chars.len() {
         let (pos, c) = chars[i];
         let next = chars.get(i + 1).map(|&(_, n)| n);
+        let in_template = !template_stack.is_empty();
 
         if is_identifier_char(c) {
             let continues_word = i > 0 && is_identifier_char(chars[i - 1].1);
@@ -247,7 +255,7 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
                 word.clear();
             }
             word.push(c);
-            emit(&mut out, &template_stack, (pos, c));
+            emit(&mut out, &mut state, in_template, (pos, c));
             i += 1;
             continue;
         }
@@ -260,14 +268,16 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
 
         match c {
             '\'' | '"' => {
-                emit(&mut out, &template_stack, (pos, '"'));
+                emit(&mut out, &mut state, in_template, (pos, '"'));
                 i = skip_string(&chars, i + 1, c)?;
             }
             '`' => {
-                emit(&mut out, &template_stack, (pos, '"'));
+                emit(&mut out, &mut state, in_template, (pos, '"'));
                 let (after, opened_substitution) = skip_template(&chars, i + 1)?;
                 if opened_substitution {
                     template_stack.push(brace_depth);
+                    // A substitution starts an expression, like `(`.
+                    state.push('{');
                 }
                 i = after;
             }
@@ -283,13 +293,23 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
                     .position(|w| w[0].1 == '*' && w[1].1 == '/')?;
                 i = i + 2 + close + 2;
             }
-            '/' if starts_regex(&out, &previous_word) => {
-                emit(&mut out, &template_stack, (pos, '"'));
+            '/' if state.starts_regex(&previous_word) => {
+                emit(&mut out, &mut state, in_template, (pos, '"'));
                 i = skip_regex(&chars, i + 1)?;
+            }
+            '(' => {
+                state.open_paren(&previous_word);
+                emit(&mut out, &mut state, in_template, (pos, c));
+                i += 1;
+            }
+            ')' => {
+                emit(&mut out, &mut state, in_template, (pos, c));
+                state.close_paren();
+                i += 1;
             }
             '{' => {
                 brace_depth += 1;
-                emit(&mut out, &template_stack, (pos, c));
+                emit(&mut out, &mut state, in_template, (pos, c));
                 i += 1;
             }
             '}' if template_stack.last() == Some(&brace_depth) => {
@@ -298,16 +318,20 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
                 let (after, opened_substitution) = skip_template(&chars, i + 1)?;
                 if opened_substitution {
                     template_stack.push(brace_depth);
+                    state.push('{');
+                } else {
+                    // The template literal ended: it is one operand.
+                    state.push('"');
                 }
                 i = after;
             }
             '}' => {
                 brace_depth = brace_depth.saturating_sub(1);
-                emit(&mut out, &template_stack, (pos, c));
+                emit(&mut out, &mut state, in_template, (pos, c));
                 i += 1;
             }
             _ => {
-                emit(&mut out, &template_stack, (pos, c));
+                emit(&mut out, &mut state, in_template, (pos, c));
                 i += 1;
             }
         }
@@ -320,21 +344,56 @@ fn code_chars(source: &str) -> Option<Vec<(usize, char)>> {
     }
 }
 
-/// Whether a `/` after the code chars `before` starts a regex literal
-/// rather than a division. `previous_word` is the identifier or keyword
-/// right before the `/`, if any.
-fn starts_regex(before: &[(usize, char)], previous_word: &str) -> bool {
-    let mut recent = before.iter().rev().map(|&(_, c)| c);
-    let Some(previous) = recent.next() else {
-        return true;
-    };
-    match previous {
-        // After an identifier or number: division, unless it is a keyword
-        // such as `return` that expects an expression.
-        c if is_identifier_char(c) => REGEX_PRECEDING_KEYWORDS.contains(&previous_word),
-        // Postfix `i++ /` and `i-- /` end an operand: division.
-        '+' | '-' => recent.next() != Some(previous),
-        c => "(,=:[!&|?{};*%<>~^".contains(c),
+/// Keywords whose `( ... )` is followed by a statement, so a `/` right
+/// after the closing `)` starts a regex.
+const CONTROL_KEYWORDS: &[&str] = &["if", "while", "for", "with"];
+
+/// What the scanner needs to know to tell a regex `/` from a division.
+#[derive(Default)]
+struct RegexContext {
+    /// The last two code chars (string, template and regex literals as `"`).
+    last: Option<char>,
+    before_last: Option<char>,
+    /// For each open `(`: whether it follows `if`, `while`, `for` or `with`.
+    paren_is_control: Vec<bool>,
+    /// Whether the last code char is a `)` that closed a control `( ... )`.
+    after_control_paren: bool,
+}
+
+impl RegexContext {
+    fn push(&mut self, c: char) {
+        self.before_last = self.last;
+        self.last = Some(c);
+        self.after_control_paren = false;
+    }
+
+    fn open_paren(&mut self, previous_word: &str) {
+        let follows_keyword = self.last.is_some_and(is_identifier_char);
+        self.paren_is_control
+            .push(follows_keyword && CONTROL_KEYWORDS.contains(&previous_word));
+    }
+
+    /// Call after pushing the `)`.
+    fn close_paren(&mut self) {
+        self.after_control_paren = self.paren_is_control.pop().unwrap_or(false);
+    }
+
+    /// Whether a `/` here starts a regex literal rather than a division.
+    /// `previous_word` is the identifier or keyword right before the `/`.
+    fn starts_regex(&self, previous_word: &str) -> bool {
+        let Some(previous) = self.last else {
+            return true;
+        };
+        match previous {
+            // After an identifier or number: division, unless it is a
+            // keyword such as `return` that expects an expression.
+            c if is_identifier_char(c) => REGEX_PRECEDING_KEYWORDS.contains(&previous_word),
+            // `if (x) /re/.test(s)`: the `)` ends a condition, not an operand.
+            ')' => self.after_control_paren,
+            // Postfix `i++ /` and `i-- /` end an operand: division.
+            '+' | '-' => self.before_last != Some(previous),
+            c => "(,=:[!&|?{};*%<>~^".contains(c),
+        }
     }
 }
 
@@ -598,6 +657,36 @@ mod tests {
     #[test]
     fn statement_list_ending_in_semicolon_is_not_function() {
         assert!(!is_function_expression("const f = () => 1; f();"));
+    }
+
+    #[test]
+    fn regex_with_quote_inside_template_substitution_is_function() {
+        assert!(is_function_expression(r#"() => `${s.replace(/'/g, "")}`"#));
+    }
+
+    #[test]
+    fn regex_with_escaped_slashes_inside_template_substitution_is_function() {
+        assert!(is_function_expression(r"() => `${a.split(/\/\//)}`"));
+    }
+
+    #[test]
+    fn division_inside_template_substitution_is_function() {
+        assert!(is_function_expression("() => `${a / 2}px`"));
+    }
+
+    #[test]
+    fn regex_after_if_condition_is_function() {
+        assert!(is_function_expression("() => { if (x) /}/.test(s); }"));
+    }
+
+    #[test]
+    fn regex_after_while_condition_is_function() {
+        assert!(is_function_expression("() => { while (x) /}/.test(s); }"));
+    }
+
+    #[test]
+    fn division_after_call_parens_is_function() {
+        assert!(is_function_expression("() => { return f(x) / 2 + '}'; }"));
     }
 
     // --- Other expressions: evaluated as is ---
