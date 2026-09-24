@@ -16,20 +16,24 @@ use tokio::task::JoinHandle;
 
 pub const DOM_UID_PREFIX: &str = "d";
 
-/// How long the chromiumoxide handler keeps a CDP request pending before it
-/// fails it with `CdpError::Timeout`.
+/// Request timeout handed to the chromiumoxide handler
+/// (`HandlerConfig::request_timeout`).
 ///
-/// chromiumoxide defaults to 30 s. That is shorter than the longest wait a
-/// tool may ask the page to run (`cdp_wait_for_page_change` accepts up to
-/// 55 s), so the transport would cut such calls off before the tool's own
-/// timeout fires. 65 s keeps a 10 s margin above the longest tool wait for
-/// the JS timer to fire and the result to travel back.
+/// chromiumoxide defaults to 30 s, shorter than the longest wait a tool may
+/// ask the page to run (`cdp_wait_for_page_change` accepts up to 55 s).
 ///
-/// Only calls sent through `Page::evaluate_expression` /
-/// `Page::evaluate_function` use this limit. `Page::execute` arms its own
-/// fixed 30 s timer that ignores `HandlerConfig::request_timeout`, so any
-/// call that can await a long page promise must use the evaluate APIs (see
-/// `tools::script`).
+/// What this value does and does not do in chromiumoxide 0.9.1:
+/// - It applies only to calls sent through `Page::evaluate_expression` /
+///   `Page::evaluate_function`. `Page::execute` arms its own fixed 30 s
+///   timer that ignores this setting, so calls that can await a long page
+///   promise use the evaluate APIs (see `tools::script`).
+/// - The handler checks for timed-out requests on a periodic job whose
+///   period is this same value. A request that never gets an answer is
+///   therefore failed between 65 s and about 130 s after it was sent.
+///
+/// This is a backstop only. Every long call is also bounded by its tool
+/// with `tokio::time::timeout` (the tool's own limit plus a small margin),
+/// and those limits are all below 65 s.
 pub const CDP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
 
 /// CDP client state, owned by the MCP server.
