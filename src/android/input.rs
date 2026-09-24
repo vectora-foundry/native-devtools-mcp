@@ -38,30 +38,13 @@ pub fn press_key(device: &mut AndroidDevice, key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Escape text for `adb shell input text`. Spaces become `%s` and shell
-/// metacharacters are backslash-escaped.
+/// Encode text for `adb shell input text`, which reads `%s` as a space.
+/// Shell quoting is done separately by `AndroidDevice::shell_args`.
+///
+/// `input text` has no escape for a literal `%s`, so that sequence is always
+/// typed as a space.
 fn escape_for_input(text: &str) -> String {
-    let mut result = String::with_capacity(text.len() * 2);
-    for c in text.chars() {
-        match c {
-            ' ' => result.push_str("%s"),
-            '\\' => result.push_str("\\\\"),
-            '"' => result.push_str("\\\""),
-            '\'' => result.push_str("\\'"),
-            '&' => result.push_str("\\&"),
-            '|' => result.push_str("\\|"),
-            ';' => result.push_str("\\;"),
-            '(' => result.push_str("\\("),
-            ')' => result.push_str("\\)"),
-            '<' => result.push_str("\\<"),
-            '>' => result.push_str("\\>"),
-            '`' => result.push_str("\\`"),
-            '$' => result.push_str("\\$"),
-            '!' => result.push_str("\\!"),
-            _ => result.push(c),
-        }
-    }
-    result
+    text.replace(' ', "%s")
 }
 
 #[cfg(test)]
@@ -74,12 +57,12 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_special_chars() {
-        assert_eq!(escape_for_input("a&b"), "a\\&b");
-        assert_eq!(escape_for_input("it's"), "it\\'s");
-        assert_eq!(escape_for_input("a\"b"), "a\\\"b");
-        assert_eq!(escape_for_input("$HOME"), "\\$HOME");
-        assert_eq!(escape_for_input("wow!"), "wow\\!");
+    fn test_escape_leaves_shell_metacharacters_for_quoting() {
+        // Backslash escapes here would be typed literally, because
+        // shell_args single-quotes the whole argument.
+        assert_eq!(escape_for_input("a&b"), "a&b");
+        assert_eq!(escape_for_input("it's"), "it's");
+        assert_eq!(escape_for_input("$HOME"), "$HOME");
     }
 
     #[test]
